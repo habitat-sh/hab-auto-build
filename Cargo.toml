@@ -1,0 +1,22 @@
+[package]
+name = "hab-auto-build"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4.0.10", features = ["derive"] }
+lazy_static = { version = "1.4" }
+petgraph = { version = "0.6" }
+tempdir = { version = "0.3" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+glob = { version = "0.3" }
+dashmap = { version = "5.4" }
+futures = { version = "0.3" }
+names = { version = "0.14" }
