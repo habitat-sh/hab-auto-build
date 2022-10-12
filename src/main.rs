@@ -8,7 +8,7 @@ use petgraph::{
     algo,
     dot::{Config, Dot},
     stable_graph::NodeIndex,
-    visit::NodeFiltered,
+    visit::{IntoNodeReferences, NodeFiltered},
     Direction, Graph,
 };
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,27 @@ enum Commands {
     Build(BuildArgs),
     /// Visualize dependencies between a set of packages
     Visualize(VisualizeArgs),
+    /// Analyze dependencies between a set of packages
+    Analyze(AnalyzeArgs),
+}
+
+#[derive(Debug, Args)]
+struct AnalyzeArgs {
+    /// Path to hab auto build configuration
+    #[arg(short, long)]
+    config_path: Option<PathBuf>,
+    /// Visualize reverse dependencies
+    #[arg(short, long)]
+    reverse_deps: bool,
+    /// List of plans to start analysis
+    #[arg(short, long)]
+    start_packages: Vec<String>,
+    /// List of plans to end analysis
+    #[arg(short, long)]
+    end_packages: Option<Vec<String>>,
+    /// Analysis output file
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -147,9 +168,15 @@ struct VisualizeArgs {
     /// Path to hab auto build configuration
     #[arg(short, long)]
     config_path: Option<PathBuf>,
-    /// List of updated plans
+    /// Visualize reverse dependencies
     #[arg(short, long)]
-    updated_packages: Vec<String>,
+    reverse_deps: bool,
+    /// List of plans to start analysis
+    #[arg(short, long)]
+    start_packages: Vec<String>,
+    /// List of plans to end analysis
+    #[arg(short, long)]
+    end_packages: Option<Vec<String>>,
     /// Dependency graph output file
     #[arg(short, long)]
     output: PathBuf,
@@ -878,13 +905,15 @@ impl MetadataScript {
 }
 
 async fn dep_graph_build(
-    updated_package_idents: Vec<PackageDepIdent>,
+    start_package_idents: Vec<PackageDepIdent>,
+    end_package_idents: Vec<PackageDepIdent>,
     auto_build_config: HabitatAutoBuildConfiguration,
-) -> Result<(Graph<PackageBuild, ()>, Vec<NodeIndex>)> {
+) -> Result<(Graph<PackageBuild, ()>, Vec<NodeIndex>, Vec<NodeIndex>)> {
     let script = MetadataScript::new().await?;
     let mut dep_graph = Graph::new();
     let mut packages = HashMap::new();
-    let mut updated_package_nodes = Vec::new();
+    let mut source_package_nodes = Vec::new();
+    let mut sink_package_nodes = Vec::new();
 
     for repo_config in auto_build_config.repos {
         info!(
@@ -921,11 +950,17 @@ async fn dep_graph_build(
             {
                 studio_package_node = Some(node);
             }
-            if updated_package_idents
+            if start_package_idents
                 .iter()
                 .any(|ident| ident.matches_build(&metadata.ident))
             {
-                updated_package_nodes.push(node);
+                source_package_nodes.push(node);
+            }
+            if end_package_idents
+                .iter()
+                .any(|ident| ident.matches_build(&metadata.ident))
+            {
+                sink_package_nodes.push(node);
             }
 
             packages.insert(metadata.ident.clone(), (node, metadata.clone()));
@@ -967,15 +1002,23 @@ async fn dep_graph_build(
             }
         }
     }
-    Ok((dep_graph, updated_package_nodes))
+    Ok((dep_graph, source_package_nodes, sink_package_nodes))
 }
 
 async fn visualize(args: VisualizeArgs) -> Result<()> {
-    let updated_package_idents = args
-        .updated_packages
+    let start_package_idents = args
+        .start_packages
         .into_iter()
         .map(|value| PackageDepIdent::try_from(value))
         .collect::<Result<Vec<PackageDepIdent>, _>>()?;
+    let end_package_idents = if let Some(end_packages) = args.end_packages {
+        end_packages
+            .into_iter()
+            .map(|value| PackageDepIdent::try_from(value))
+            .collect::<Result<Vec<PackageDepIdent>, _>>()?
+    } else {
+        Vec::new()
+    };
     let auto_build_config = HabitatAutoBuildConfiguration::new(
         args.config_path
             .unwrap_or(env::current_dir()?.join("hab-auto-build.json")),
@@ -983,21 +1026,42 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, updated_package_nodes) =
-        dep_graph_build(updated_package_idents, auto_build_config).await?;
+    let (dep_graph, start_package_nodes, end_package_nodes) =
+        dep_graph_build(start_package_idents, end_package_idents, auto_build_config).await?;
 
-    let output = if updated_package_nodes.is_empty() {
-        format!("{:?}", Dot::with_config(&dep_graph, &[Config::EdgeNoLabel]))
-    } else {
+    let output = {
         let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
-            let mut is_affected = false;
-            for updated_package_node in updated_package_nodes.iter() {
-                if algo::has_path_connecting(&dep_graph, node, *updated_package_node, None) {
-                    is_affected = true;
-                    break;
+            let mut include = true;
+            for start_package_node in start_package_nodes.iter() {
+                if args.reverse_deps {
+                    if !algo::has_path_connecting(&dep_graph, node, *start_package_node, None) {
+                        include = false;
+                        break;
+                    }
+                } else {
+                    if !algo::has_path_connecting(&dep_graph, *start_package_node, node, None) {
+                        include = false;
+                        break;
+                    }
                 }
             }
-            is_affected
+            for end_package_node in end_package_nodes.iter() {
+                if node == *end_package_node {
+                    break;
+                }
+                if args.reverse_deps {
+                    if algo::has_path_connecting(&dep_graph, node, *end_package_node, None) {
+                        include = false;
+                        break;
+                    }
+                } else {
+                    if algo::has_path_connecting(&dep_graph, *end_package_node, node, None) {
+                        include = false;
+                        break;
+                    }
+                }
+            }
+            include
         });
         format!(
             "{:?}",
@@ -1009,6 +1073,86 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
     output_file.write_all(output.as_bytes()).await?;
     output_file.shutdown().await?;
 
+    Ok(())
+}
+
+async fn analyze(args: AnalyzeArgs) -> Result<()> {
+    let start_package_idents = args
+        .start_packages
+        .into_iter()
+        .map(|value| PackageDepIdent::try_from(value))
+        .collect::<Result<Vec<PackageDepIdent>, _>>()?;
+
+    let end_package_idents = if let Some(end_packages) = args.end_packages {
+        end_packages
+            .into_iter()
+            .map(|value| PackageDepIdent::try_from(value))
+            .collect::<Result<Vec<PackageDepIdent>, _>>()?
+    } else {
+        Vec::new()
+    };
+    let auto_build_config = HabitatAutoBuildConfiguration::new(
+        args.config_path
+            .unwrap_or(env::current_dir()?.join("hab-auto-build.json")),
+    )
+    .await
+    .context("Failed to load habitat auto build configuration")?;
+
+    let (dep_graph, start_package_nodes, end_package_nodes) =
+        dep_graph_build(start_package_idents, end_package_idents, auto_build_config).await?;
+
+    let packages = {
+        let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
+            let mut include = true;
+            for start_package_node in start_package_nodes.iter() {
+                if args.reverse_deps {
+                    if !algo::has_path_connecting(&dep_graph, node, *start_package_node, None) {
+                        include = false;
+                        break;
+                    }
+                } else {
+                    if !algo::has_path_connecting(&dep_graph, *start_package_node, node, None) {
+                        include = false;
+                        break;
+                    }
+                }
+            }
+            for end_package_node in end_package_nodes.iter() {
+                if node == *end_package_node {
+                    break;
+                }
+                if args.reverse_deps {
+                    if algo::has_path_connecting(&dep_graph, node, *end_package_node, None) {
+                        include = false;
+                        break;
+                    }
+                } else {
+                    if algo::has_path_connecting(&dep_graph, *end_package_node, node, None) {
+                        include = false;
+                        break;
+                    }
+                }
+            }
+            include
+        });
+        let mut packages = Vec::new();
+        for (_, node) in build_graph.node_references() {
+            packages.push(format!("{}", node.plan.ident))
+        }
+        packages
+    };
+
+    if let Some(output_file_path) = args.output {
+        let mut output_file = tokio::fs::File::create(output_file_path).await?;
+        output_file
+            .write_all(packages.join("\n").as_bytes())
+            .await?;
+        output_file.shutdown().await?;
+    } else {
+        for package in packages {
+            println!("{}", package);
+        }
+    }
     Ok(())
 }
 
@@ -1026,8 +1170,8 @@ async fn build(args: BuildArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, updated_package_nodes) =
-        dep_graph_build(updated_package_idents, auto_build_config).await?;
+    let (dep_graph, updated_package_nodes, _) =
+        dep_graph_build(updated_package_idents, Vec::new(), auto_build_config).await?;
 
     let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
         let mut is_affected = false;
@@ -1087,6 +1231,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Build(args) => build(args).await,
         Commands::Visualize(args) => visualize(args).await,
+        Commands::Analyze(args) => analyze(args).await,
     }
 }
 
@@ -1154,7 +1299,12 @@ impl<'a> PackageBuilder<'a> {
 
         let mut child = match build.package_type {
             PackageType::Native => {
-                info!("Building native package {} in {}, view log at {}", source.display(), repo.display(), build.build_log_file(&build_id).display());
+                info!(
+                    "Building native package {} in {}, view log at {}",
+                    source.display(),
+                    repo.display(),
+                    build.build_log_file(&build_id).display()
+                );
                 tokio::process::Command::new("hab")
                     .arg("pkg")
                     .arg("build")
@@ -1200,7 +1350,12 @@ impl<'a> PackageBuilder<'a> {
                         pkg_deps.push(format!("{}", resolved_dep))
                     }
                 }
-                info!("Building package {} in {} with bootstrap studio, view log at {}", source.display(), repo.display(), build.build_log_file(&build_id).display());
+                info!(
+                    "Building package {} in {} with bootstrap studio, view log at {}",
+                    source.display(),
+                    repo.display(),
+                    build.build_log_file(&build_id).display()
+                );
                 tokio::process::Command::new("sudo")
                     .arg("-E")
                     .arg("hab")
@@ -1241,7 +1396,12 @@ impl<'a> PackageBuilder<'a> {
                     .expect("Failed to invoke hab build command")
             }
             PackageType::Standard => {
-                info!("Building package {} in {} with standard studio, view log at {}", source.display(), repo.display(), build.build_log_file(&build_id).display());
+                info!(
+                    "Building package {} in {} with standard studio, view log at {}",
+                    source.display(),
+                    repo.display(),
+                    build.build_log_file(&build_id).display()
+                );
                 tokio::process::Command::new("hab")
                     .arg("pkg")
                     .arg("build")
