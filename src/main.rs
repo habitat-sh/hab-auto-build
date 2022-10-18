@@ -5,15 +5,15 @@ use dashmap::DashSet;
 use futures::{stream::FuturesUnordered, StreamExt};
 use names::{Generator, Name};
 use petgraph::{
-    algo,
+    algo::{self, greedy_feedback_arc_set},
     dot::{Config, Dot},
-    stable_graph::NodeIndex,
-    visit::{IntoNodeReferences, NodeFiltered},
+    stable_graph::{EdgeIndex, NodeIndex},
+    visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences, NodeFiltered},
     Direction, Graph,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     env,
     ffi::OsString,
     fmt::Display,
@@ -58,6 +58,9 @@ lazy_static::lazy_static! {
     };
 }
 
+type ArtifactCacheIndex =
+    HashMap<String, HashMap<String, BTreeMap<String, HashMap<PackageTarget, BTreeSet<String>>>>>;
+
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
 #[serde(try_from = "String")]
 pub enum PackageTarget {
@@ -100,8 +103,10 @@ impl TryFrom<String> for PackageTarget {
     }
 }
 
-const HAB_AUTO_BUILD_EXTRACT_SOURCE_FILE: (&str, &[u8]) =
-    ("extract.sh", include_bytes!("./scripts/extract.sh"));
+const HAB_AUTO_BUILD_EXTRACT_SOURCE_FILES: [(&str, &[u8]); 2] = [
+    ("extract.sh", include_bytes!("./scripts/extract.sh")),
+    ("cache_index.sh", include_bytes!("./scripts/cache_index.sh")),
+];
 
 #[derive(Debug, Deserialize, Serialize)]
 struct HabitatAutoBuildConfiguration {
@@ -152,6 +157,9 @@ struct AnalyzeArgs {
     /// Visualize reverse dependencies
     #[arg(short, long)]
     reverse_deps: bool,
+    /// Remove cycles in dependencies
+    #[arg(short = 'n', long)]
+    remove_cycles: bool,
     /// List of plans to start analysis
     #[arg(short, long)]
     start_packages: Vec<String>,
@@ -171,6 +179,9 @@ struct VisualizeArgs {
     /// Visualize reverse dependencies
     #[arg(short, long)]
     reverse_deps: bool,
+    /// Remove cycles in dependencies
+    #[arg(short = 'n', long)]
+    remove_cycles: bool,
     /// List of plans to start analysis
     #[arg(short, long)]
     start_packages: Vec<String>,
@@ -189,7 +200,7 @@ struct BuildArgs {
     config_path: Option<PathBuf>,
     /// Unique ID to identify the build
     #[arg(short = 'i', long)]
-    build_id: Option<String>,
+    session_id: Option<String>,
     /// Maximum number of parallel build workers
     #[arg(short, long)]
     workers: Option<usize>,
@@ -282,6 +293,7 @@ impl From<PackageType> for String {
     }
 }
 
+#[derive(Clone)]
 struct PackageBuild {
     pub plan: PlanMetadata,
     pub package_type: PackageType,
@@ -350,44 +362,103 @@ impl PackageBuild {
             repo,
         }
     }
-    fn repo_build_folder(&self, build_id: &str) -> PathBuf {
-        self.plan
-            .repo
-            .join(".hab-auto-build")
-            .join("builds")
-            .join(&build_id)
+    async fn is_updated(&self, scripts: &Scripts) -> Result<bool> {
+        let last_build = {
+            let dep_ident = PackageDepIdent::from(&self.plan.ident);
+            if let Ok(Some(artifact)) = dep_ident
+                .latest_artifact(self.plan.ident.target, scripts)
+                .await
+            {
+                Some((
+                    artifact.clone(),
+                    tokio::fs::metadata(
+                        PathBuf::from("/hab")
+                            .join("cache")
+                            .join("artifacts")
+                            .join(artifact.to_string()),
+                    )
+                    .await?
+                    .modified()?,
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some((artifact, last_build)) = last_build {
+            let source_folder = self.source_folder();
+            let mut next_entries = VecDeque::new();
+            next_entries.push_back(source_folder);
+            while !next_entries.is_empty() {
+                let current_dir = next_entries.pop_front().unwrap();
+                let metadata = tokio::fs::metadata(current_dir.as_path()).await?;
+                let last_modified = metadata.modified()?;
+                if metadata.is_file() && last_modified > last_build {
+                    debug!("For {} {}[{:?}] is modified after the last build {}[{:?}], considering it as changed", self.plan.ident, current_dir.display(), last_modified, artifact ,last_build);
+                    return Ok(true);
+                }
+                if metadata.is_dir() {
+                    if last_modified > last_build {
+                        debug!("For {} {}[{:?}] is modified after the last build {}[{:?}], considering it as changed", self.plan.ident, current_dir.display(), last_modified, artifact ,last_build);
+                        return Ok(true);
+                    }
+                    let mut read_dir = tokio::fs::read_dir(current_dir.as_path()).await?;
+                    while let Some(dir) = read_dir.next_entry().await? {
+                        next_entries.push_back(dir.path());
+                    }
+                }
+            }
+            debug!(
+                "Found recent build artifact {} for {}",
+                artifact.to_string(),
+                self.plan.ident
+            );
+            Ok(false)
+        } else {
+            debug!(
+                "No build artifact existing for {}, considering it as changed",
+                self.plan.ident
+            );
+            Ok(true)
+        }
     }
-    fn package_build_folder(&self, build_id: &str) -> PathBuf {
+    fn repo_build_folder(&self, session_id: &str) -> PathBuf {
         self.plan
             .repo
             .join(".hab-auto-build")
             .join("builds")
-            .join(&build_id)
+            .join(&session_id)
+    }
+    fn package_build_folder(&self, session_id: &str) -> PathBuf {
+        self.plan
+            .repo
+            .join(".hab-auto-build")
+            .join("builds")
+            .join(&session_id)
             .join(self.plan.ident.origin.as_str())
             .join(self.plan.ident.name.as_str())
     }
-    fn package_studio_build_folder(&self, build_id: &str) -> PathBuf {
+    fn package_studio_build_folder(&self, session_id: &str) -> PathBuf {
         PathBuf::from("/src")
             .join(".hab-auto-build")
             .join("builds")
-            .join(&build_id)
+            .join(&session_id)
             .join(self.plan.ident.origin.as_str())
             .join(self.plan.ident.name.as_str())
     }
-    fn build_log_file(&self, build_id: &str) -> PathBuf {
-        self.package_build_folder(build_id).join("build.log")
+    fn build_log_file(&self, session_id: &str) -> PathBuf {
+        self.package_build_folder(session_id).join("build.log")
     }
-    fn build_success_file(&self, build_id: &str) -> PathBuf {
-        self.package_build_folder(build_id).join("BUILD_OK")
+    fn build_success_file(&self, session_id: &str) -> PathBuf {
+        self.package_build_folder(session_id).join("BUILD_OK")
     }
-    fn build_results_file(&self, build_id: &str) -> PathBuf {
-        self.package_build_folder(build_id).join("last_build.env")
+    fn build_results_file(&self, session_id: &str) -> PathBuf {
+        self.package_build_folder(session_id).join("last_build.env")
     }
-    async fn last_build_artifact(&self, build_id: &str) -> Result<PackageArtifactIdent> {
-        let metadata = tokio::fs::metadata(self.build_success_file(build_id)).await?;
+    async fn last_build_artifact(&self, session_id: &str) -> Result<PackageArtifactIdent> {
+        let metadata = tokio::fs::metadata(self.build_success_file(session_id)).await?;
         if metadata.is_file() {
             let build_results =
-                tokio::fs::read_to_string(self.build_results_file(build_id)).await?;
+                tokio::fs::read_to_string(self.build_results_file(session_id)).await?;
             for line in build_results.lines() {
                 if line.starts_with("pkg_artifact=") {
                     return PackageArtifactIdent::parse_with_build(
@@ -399,7 +470,7 @@ impl PackageBuild {
             Err(anyhow!(
                 "The package {:?} does not have a build artifact mentioned in {}",
                 self.plan.ident,
-                self.build_results_file(build_id).display()
+                self.build_results_file(session_id).display()
             ))
         } else {
             Err(anyhow!(
@@ -446,6 +517,32 @@ pub struct PackageArtifactIdent {
 }
 
 impl PackageArtifactIdent {
+    fn parse_with_ident(filename: &str, ident: &PackageIdent) -> Result<PackageArtifactIdent> {
+        if let Some(target) = filename
+            .strip_prefix(
+                format!(
+                    "{}-{}-{}-{}-",
+                    ident.origin, ident.name, ident.version, ident.release
+                )
+                .as_str(),
+            )
+            .and_then(|filename| filename.strip_suffix(".hart"))
+        {
+            Ok(PackageArtifactIdent {
+                origin: ident.origin.clone(),
+                name: ident.name.clone(),
+                version: ident.version.clone(),
+                release: ident.release.to_string(),
+                target: PackageTarget::try_from(target)?,
+            })
+        } else {
+            Err(anyhow!(
+                "Invalid package artifact {} for ident {}",
+                filename,
+                ident
+            ))
+        }
+    }
     fn parse_with_build(filename: &str, build: &PackageBuild) -> Result<PackageArtifactIdent> {
         if let Some(release) = filename
             .strip_prefix(
@@ -619,7 +716,11 @@ impl PartialOrd for PackageBuildIdent {
 
 impl std::fmt::Display for PackageBuildIdent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}/{}", self.origin, self.name, self.version,)
+        if self.version.is_empty() {
+            write!(f, "{}/{}", self.origin, self.name)
+        } else {
+            write!(f, "{}/{}/{}", self.origin, self.name, self.version)
+        }
     }
 }
 
@@ -652,18 +753,69 @@ impl PackageDepIdent {
     pub async fn latest_artifact(
         &self,
         target: PackageTarget,
+        scripts: &Scripts,
     ) -> Result<Option<PackageArtifactIdent>> {
-        let output = tokio::process::Command::new("hab")
-            .arg("pkg")
-            .arg("path")
-            .arg(self.to_string())
-            .output()
-            .await?
-            .stdout;
-        let path = PathBuf::from(OsString::from_vec(output));
-        if let Ok(path) = path.strip_prefix(HAB_PKGS_PATH.as_path()) {
-            let pkg_ident = PackageIdent::try_from(path.to_str().unwrap().trim())?;
-            Ok(Some(pkg_ident.artifact(target)))
+        let cache_index = scripts.cache_index(&self.origin, &self.name).await.unwrap();
+        if let Some(version_index) = cache_index
+            .get(&self.origin)
+            .and_then(|c| c.get(&self.name))
+        {
+            if let Some(version) = self.version.as_ref() {
+                if let Some(release) = self.release.as_ref() {
+                    // Exact match
+                    if version_index
+                        .get(version)
+                        .and_then(|t| t.get(&target))
+                        .and_then(|r| r.get(release))
+                        .is_some()
+                    {
+                        Ok(Some(PackageArtifactIdent {
+                            origin: self.origin.clone(),
+                            name: self.name.clone(),
+                            version: version.clone(),
+                            release: release.clone(),
+                            target,
+                        }))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    // Latest release
+                    if let Some(release) = version_index
+                        .get(version)
+                        .and_then(|t| t.get(&target))
+                        .and_then(|r| r.iter().last())
+                    {
+                        Ok(Some(PackageArtifactIdent {
+                            origin: self.origin.clone(),
+                            name: self.name.clone(),
+                            version: version.clone(),
+                            release: release.clone(),
+                            target,
+                        }))
+                    } else {
+                        Ok(None)
+                    }
+                }
+            } else {
+                // Latest version, latest release
+                if let Some((version, release)) = version_index
+                    .iter()
+                    .last()
+                    .and_then(|(version, c)| c.get(&target).map(|releases| (version, releases)))
+                    .and_then(|(version, releases)| releases.iter().last().map(|r| (version, r)))
+                {
+                    Ok(Some(PackageArtifactIdent {
+                        origin: self.origin.clone(),
+                        name: self.name.clone(),
+                        version: version.clone(),
+                        release: release.clone(),
+                        target,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
         } else {
             Ok(None)
         }
@@ -708,12 +860,33 @@ impl std::fmt::Display for PackageDepIdent {
         f.write_str("/")?;
         f.write_str(&self.name)?;
         if let Some(version) = self.version.as_ref() {
-            f.write_str(version)?;
+            if !version.is_empty() {
+                f.write_str("/")?;
+                f.write_str(version)?;
+            }
         }
         if let Some(release) = self.release.as_ref() {
-            f.write_str(release)?;
+            if !release.is_empty() {
+                f.write_str("/")?;
+                f.write_str(release)?;
+            }
         }
         Ok(())
+    }
+}
+
+impl From<&PackageBuildIdent> for PackageDepIdent {
+    fn from(ident: &PackageBuildIdent) -> Self {
+        PackageDepIdent {
+            origin: ident.origin.clone(),
+            name: ident.name.clone(),
+            version: if ident.version.is_empty() {
+                None
+            } else {
+                Some(ident.version.clone())
+            },
+            release: None,
+        }
     }
 }
 
@@ -762,12 +935,8 @@ impl PlanSource {
         }
     }
 
-    pub async fn metadata(
-        &self,
-        target: PackageTarget,
-        script: &MetadataScript,
-    ) -> Result<PlanMetadata> {
-        script.execute(target, self).await
+    pub async fn metadata(&self, target: PackageTarget, script: &Scripts) -> Result<PlanMetadata> {
+        script.metadata_extract(target, self).await
     }
 }
 
@@ -815,11 +984,7 @@ impl PackageSource {
             repo: repo.as_ref().into(),
         })
     }
-    pub async fn metadata(
-        &self,
-        target: PackageTarget,
-        script: &MetadataScript,
-    ) -> Result<PlanMetadata> {
+    pub async fn metadata(&self, target: PackageTarget, script: &Scripts) -> Result<PlanMetadata> {
         // Search for target specific plan
         let plan_source = PlanSource::new(
             self.path.join(target.to_string()).join("plan.sh"),
@@ -852,42 +1017,76 @@ impl PackageSource {
     }
 }
 
-pub struct MetadataScript {
+pub struct Scripts {
     tmp_dir: TempDir,
-    script_path: PathBuf,
+    script_paths: HashMap<String, PathBuf>,
 }
 
-impl MetadataScript {
-    pub async fn new() -> Result<MetadataScript> {
+impl Scripts {
+    pub async fn new() -> Result<Scripts> {
         let tmp_dir = TempDir::new("hab-auto-build")?;
-        let (script_file_name, script_file_data) = HAB_AUTO_BUILD_EXTRACT_SOURCE_FILE;
-        let script_path = tmp_dir.path().join(script_file_name);
-        File::create(&script_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to create plan build source file '{}'",
-                    script_path.display()
-                )
-            })?
-            .write_all(script_file_data)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to write data to plan build source \
+        let mut script_paths = HashMap::new();
+        for (script_file_name, script_file_data) in HAB_AUTO_BUILD_EXTRACT_SOURCE_FILES {
+            let script_path = tmp_dir.path().join(script_file_name);
+            File::create(&script_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to create plan build source file '{}'",
+                        script_path.display()
+                    )
+                })?
+                .write_all(script_file_data)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to write data to plan build source \
                                                     file '{}'",
-                    script_path.display()
-                )
-            })?;
-        Ok(MetadataScript {
+                        script_path.display()
+                    )
+                })?;
+            script_paths.insert(script_file_name.to_string(), script_path);
+        }
+
+        Ok(Scripts {
             tmp_dir,
-            script_path,
+            script_paths,
         })
     }
 
-    pub async fn execute(&self, target: PackageTarget, plan: &PlanSource) -> Result<PlanMetadata> {
+    pub async fn cache_index(&self, origin: &str, name: &str) -> Result<ArtifactCacheIndex> {
         let output = tokio::process::Command::new("bash")
-            .arg(self.script_path.as_path())
+            .arg(self.script_paths.get("cache_index.sh").unwrap().as_path())
+            .arg(format!("{}-{}", origin, name))
+            .output()
+            .await?;
+        let cache_data = String::from_utf8_lossy(output.stdout.as_slice());
+        let mut cache: ArtifactCacheIndex = HashMap::new();
+        for line in cache_data.lines() {
+            let parts = line.split('=').collect::<Vec<_>>();
+            let pkg_ident = PackageIdent::try_from(parts[0])?;
+            let pkg_artifact = PackageArtifactIdent::parse_with_ident(parts[1], &pkg_ident)?;
+            cache
+                .entry(pkg_ident.origin)
+                .or_default()
+                .entry(pkg_ident.name)
+                .or_default()
+                .entry(pkg_ident.version)
+                .or_default()
+                .entry(pkg_artifact.target)
+                .or_default()
+                .insert(pkg_artifact.release);
+        }
+        Ok(cache)
+    }
+
+    pub async fn metadata_extract(
+        &self,
+        target: PackageTarget,
+        plan: &PlanSource,
+    ) -> Result<PlanMetadata> {
+        let output = tokio::process::Command::new("bash")
+            .arg(self.script_paths.get("extract.sh").unwrap().as_path())
             .arg(plan.path.as_path())
             .arg(plan.src.as_path())
             .arg(plan.repo.as_path())
@@ -908,12 +1107,19 @@ async fn dep_graph_build(
     start_package_idents: Vec<PackageDepIdent>,
     end_package_idents: Vec<PackageDepIdent>,
     auto_build_config: HabitatAutoBuildConfiguration,
-) -> Result<(Graph<PackageBuild, ()>, Vec<NodeIndex>, Vec<NodeIndex>)> {
-    let script = MetadataScript::new().await?;
+    detect_updates: bool,
+    scripts: Arc<Scripts>,
+) -> Result<(
+    Graph<PackageBuild, ()>,
+    Vec<NodeIndex>,
+    Vec<NodeIndex>,
+    Vec<NodeIndex>,
+)> {
     let mut dep_graph = Graph::new();
     let mut packages = HashMap::new();
     let mut source_package_nodes = Vec::new();
     let mut sink_package_nodes = Vec::new();
+    let mut updated_package_nodes = Vec::new();
 
     for repo_config in auto_build_config.repos {
         info!(
@@ -930,10 +1136,18 @@ async fn dep_graph_build(
         let mut studio_package_node = None;
         for package_source in package_sources {
             let metadata = package_source
-                .metadata(PackageTarget::AArch64Linux, &script)
+                .metadata(PackageTarget::AArch64Linux, &scripts)
                 .await?;
             let build = PackageBuild::new(repo.clone(), metadata.clone());
+            let build_is_updated = if detect_updates {
+                build.is_updated(&scripts).await?
+            } else {
+                false
+            };
             let node = dep_graph.add_node(build);
+            if build_is_updated {
+                updated_package_nodes.push(node);
+            }
             if repo
                 .config
                 .bootstrap_studio_package
@@ -1002,10 +1216,16 @@ async fn dep_graph_build(
             }
         }
     }
-    Ok((dep_graph, source_package_nodes, sink_package_nodes))
+    Ok((
+        dep_graph,
+        source_package_nodes,
+        updated_package_nodes,
+        sink_package_nodes,
+    ))
 }
 
 async fn visualize(args: VisualizeArgs) -> Result<()> {
+    let scripts = Arc::new(Scripts::new().await?);
     let start_package_idents = args
         .start_packages
         .into_iter()
@@ -1026,8 +1246,14 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, start_package_nodes, end_package_nodes) =
-        dep_graph_build(start_package_idents, end_package_idents, auto_build_config).await?;
+    let (dep_graph, start_package_nodes, _, end_package_nodes) = dep_graph_build(
+        start_package_idents,
+        end_package_idents,
+        auto_build_config,
+        false,
+        scripts,
+    )
+    .await?;
 
     let output = {
         let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
@@ -1063,10 +1289,49 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
             }
             include
         });
-        format!(
-            "{:?}",
-            Dot::with_config(&build_graph, &[Config::EdgeNoLabel])
-        )
+
+        if args.remove_cycles {
+            let mut acyclic_deps = Graph::new();
+            let mut node_map = HashMap::new();
+            for (node_index, node) in build_graph.node_references() {
+                let mapped_node = acyclic_deps.add_node((*node).clone());
+                node_map.insert(node_index, mapped_node);
+            }
+            for edge in build_graph.edge_references() {
+                if let Some((from, to)) = dep_graph.edge_endpoints(edge.id()) {
+                    acyclic_deps.add_edge(
+                        *node_map.get(&from).unwrap(),
+                        *node_map.get(&to).unwrap(),
+                        (),
+                    );
+                };
+            }
+            acyclic_deps.reverse();
+            let fas: Vec<EdgeIndex> = greedy_feedback_arc_set(&acyclic_deps)
+                .map(|e| e.id())
+                .collect();
+
+            // Remove edges in feedback arc set from original graph
+            for edge_id in fas {
+                if let Some((from, to)) = acyclic_deps.edge_endpoints(edge_id) {
+                    info!(
+                        "Removing cyclic dependency {} -> {}",
+                        acyclic_deps[from].plan.ident, acyclic_deps[to].plan.ident
+                    );
+                }
+                acyclic_deps.remove_edge(edge_id);
+            }
+            acyclic_deps.reverse();
+            format!(
+                "{:?}",
+                Dot::with_config(&acyclic_deps, &[Config::EdgeNoLabel])
+            )
+        } else {
+            format!(
+                "{:?}",
+                Dot::with_config(&build_graph, &[Config::EdgeNoLabel])
+            )
+        }
     };
     let output = output.replace("digraph {", "digraph { rankdir=LR; node [shape=rectangle, color=blue, fillcolor=lightskyblue, style=filled ]; edge [color=darkgreen];");
     let mut output_file = tokio::fs::File::create(args.output).await?;
@@ -1077,6 +1342,7 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
 }
 
 async fn analyze(args: AnalyzeArgs) -> Result<()> {
+    let scripts = Arc::new(Scripts::new().await?);
     let start_package_idents = args
         .start_packages
         .into_iter()
@@ -1098,8 +1364,14 @@ async fn analyze(args: AnalyzeArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, start_package_nodes, end_package_nodes) =
-        dep_graph_build(start_package_idents, end_package_idents, auto_build_config).await?;
+    let (dep_graph, start_package_nodes, _, end_package_nodes) = dep_graph_build(
+        start_package_idents,
+        end_package_idents,
+        auto_build_config,
+        false,
+        scripts,
+    )
+    .await?;
 
     let packages = {
         let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
@@ -1135,11 +1407,51 @@ async fn analyze(args: AnalyzeArgs) -> Result<()> {
             }
             include
         });
-        let mut packages = Vec::new();
-        for (_, node) in build_graph.node_references() {
-            packages.push(format!("{}", node.plan.ident))
+
+        if args.remove_cycles {
+            let mut acyclic_deps = Graph::new();
+            let mut node_map = HashMap::new();
+            for (node_index, node) in build_graph.node_references() {
+                let mapped_node = acyclic_deps.add_node((*node).clone());
+                node_map.insert(node_index, mapped_node);
+            }
+            for edge in build_graph.edge_references() {
+                if let Some((from, to)) = dep_graph.edge_endpoints(edge.id()) {
+                    acyclic_deps.add_edge(
+                        *node_map.get(&from).unwrap(),
+                        *node_map.get(&to).unwrap(),
+                        (),
+                    );
+                };
+            }
+            acyclic_deps.reverse();
+            let fas: Vec<EdgeIndex> = greedy_feedback_arc_set(&acyclic_deps)
+                .map(|e| e.id())
+                .collect();
+
+            // Remove edges in feedback arc set from original graph
+            for edge_id in fas {
+                if let Some((from, to)) = acyclic_deps.edge_endpoints(edge_id) {
+                    info!(
+                        "Removing cyclic dependency {} -> {}",
+                        acyclic_deps[from].plan.ident, acyclic_deps[to].plan.ident
+                    );
+                }
+                acyclic_deps.remove_edge(edge_id);
+            }
+            acyclic_deps.reverse();
+            let mut packages = Vec::new();
+            for (_, node) in acyclic_deps.node_references() {
+                packages.push(format!("{}", node.plan.ident))
+            }
+            packages
+        } else {
+            let mut packages = Vec::new();
+            for (_, node) in build_graph.node_references() {
+                packages.push(format!("{}", node.plan.ident))
+            }
+            packages
         }
-        packages
     };
 
     if let Some(output_file_path) = args.output {
@@ -1157,7 +1469,8 @@ async fn analyze(args: AnalyzeArgs) -> Result<()> {
 }
 
 async fn build(args: BuildArgs) -> Result<()> {
-    let updated_package_idents = args
+    let scripts = Arc::new(Scripts::new().await?);
+    let manually_updated_package_idents = args
         .updated_packages
         .into_iter()
         .map(|value| PackageDepIdent::try_from(value))
@@ -1170,12 +1483,43 @@ async fn build(args: BuildArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, updated_package_nodes, _) =
-        dep_graph_build(updated_package_idents, Vec::new(), auto_build_config).await?;
+    let (dep_graph, manually_updated_package_nodes, updated_package_nodes, _) = dep_graph_build(
+        manually_updated_package_idents,
+        Vec::new(),
+        auto_build_config,
+        true,
+        scripts.clone(),
+    )
+    .await?;
+
+    for updated_package_node in updated_package_nodes.iter() {
+        info!(
+            "Detected changes in {} at {}",
+            dep_graph[*updated_package_node].plan.ident,
+            dep_graph[*updated_package_node].plan.source.display()
+        );
+    }
 
     let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
         let mut is_affected = false;
         for updated_package_node in updated_package_nodes.iter() {
+            if !manually_updated_package_nodes.is_empty() {
+                let mut should_include = false;
+                for manually_updated_package_node in manually_updated_package_nodes.iter() {
+                    if algo::has_path_connecting(
+                        &dep_graph,
+                        *updated_package_node,
+                        *manually_updated_package_node,
+                        None,
+                    ) {
+                        should_include = true;
+                        break;
+                    }
+                }
+                if !should_include {
+                    continue;
+                }
+            }
             if algo::has_path_connecting(&dep_graph, node, *updated_package_node, None) {
                 is_affected = true;
                 break;
@@ -1198,17 +1542,18 @@ async fn build(args: BuildArgs) -> Result<()> {
     );
 
     let mut scheduler = Scheduler::new(
-        args.build_id.unwrap_or_else(|| {
+        args.session_id.unwrap_or_else(|| {
             let mut generator = Generator::with_naming(Name::Numbered);
             generator.next().unwrap()
         }),
         build_order.clone(),
         Arc::new(dep_graph),
+        scripts,
     );
 
     info!(
         "Beginning build {}, {} packages to be built",
-        scheduler.build_id,
+        scheduler.session_id,
         build_order.len()
     );
 
@@ -1236,7 +1581,8 @@ async fn main() -> Result<()> {
 }
 
 struct Scheduler {
-    build_id: String,
+    session_id: String,
+    scripts: Arc<Scripts>,
     built_packages: Arc<DashSet<NodeIndex>>,
     pending_packages: Arc<DashSet<NodeIndex>>,
     build_order: Arc<Vec<NodeIndex>>,
@@ -1245,22 +1591,26 @@ struct Scheduler {
 }
 
 struct PackageBuilder<'a> {
-    build_id: String,
+    session_id: String,
     worker_index: usize,
     build: &'a PackageBuild,
 }
 
 impl<'a> PackageBuilder<'a> {
-    fn new(build_id: &str, worker_index: usize, build: &'a PackageBuild) -> PackageBuilder<'a> {
+    fn new(session_id: &str, worker_index: usize, build: &'a PackageBuild) -> PackageBuilder<'a> {
         PackageBuilder {
-            build_id: build_id.to_owned(),
+            session_id: session_id.to_owned(),
             worker_index,
             build,
         }
     }
-    async fn build(self, deps_in_current_build: Vec<&PackageBuild>) -> Result<()> {
+    async fn build(
+        self,
+        deps_in_current_build: Vec<&PackageBuild>,
+        scripts: Arc<Scripts>,
+    ) -> Result<()> {
         let PackageBuilder {
-            build_id,
+            session_id,
             worker_index,
             build,
         } = self;
@@ -1271,24 +1621,24 @@ impl<'a> PackageBuilder<'a> {
             build.plan.path.display()
         );
 
-        tokio::fs::create_dir_all(&build.package_build_folder(&build_id))
+        tokio::fs::create_dir_all(&build.package_build_folder(&session_id))
             .await
             .with_context(|| {
                 format!(
                     "Failed to create build folder '{}' for package '{:?}'",
-                    build.package_build_folder(&build_id).display(),
+                    build.package_build_folder(&session_id).display(),
                     build.plan
                 )
             })?;
 
-        if let Ok(true) = tokio::fs::metadata(build.build_success_file(&build_id).as_path())
-            .await
-            .map(|metadata| metadata.is_file())
-        {
-            info!("Package {:?} already built", build.plan);
-            return Ok(());
-        }
-        let mut build_log_file = File::create(build.build_log_file(&build_id))
+        // if let Ok(true) = tokio::fs::metadata(build.build_success_file(&session_id).as_path())
+        //     .await
+        //     .map(|metadata| metadata.is_file() )
+        // {
+        //     info!("Package {:?} already built", build.plan);
+        //     return Ok(());
+        // }
+        let mut build_log_file = File::create(build.build_log_file(&session_id))
             .await
             .context(format!(
                 "Failed to create build log file for package '{:?}'",
@@ -1303,7 +1653,7 @@ impl<'a> PackageBuilder<'a> {
                     "Building native package {} in {}, view log at {}",
                     source.display(),
                     repo.display(),
-                    build.build_log_file(&build_id).display()
+                    build.build_log_file(&session_id).display()
                 );
                 tokio::process::Command::new("hab")
                     .arg("pkg")
@@ -1311,7 +1661,7 @@ impl<'a> PackageBuilder<'a> {
                     .arg("-N")
                     .arg(build.source_folder())
                     .env("HAB_FEAT_NATIVE_PACKAGE_SUPPORT", "1")
-                    .env("HAB_OUTPUT_PATH", build.package_build_folder(&build_id))
+                    .env("HAB_OUTPUT_PATH", build.package_build_folder(&session_id))
                     .current_dir(build.repo.path.as_path())
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
@@ -1328,17 +1678,27 @@ impl<'a> PackageBuilder<'a> {
                             continue;
                         }
                         if let Ok(artifact) =
-                            dep_in_current_build.last_build_artifact(&build_id).await
+                            dep_in_current_build.last_build_artifact(&session_id).await
                         {
-                            resolved_dep = Some(PackageIdent::from(artifact));
+                            resolved_dep = Some(
+                                PathBuf::from("/hab")
+                                    .join("cache")
+                                    .join("artifacts")
+                                    .join(artifact.to_string()),
+                            );
                             break;
                         }
                     }
                     if resolved_dep.is_none() {
                         if let Ok(Some(artifact)) =
-                            dep.latest_artifact(build.plan.ident.target).await
+                            dep.latest_artifact(build.plan.ident.target, &scripts).await
                         {
-                            resolved_dep = Some(PackageIdent::from(artifact));
+                            resolved_dep = Some(
+                                PathBuf::from("/hab")
+                                    .join("cache")
+                                    .join("artifacts")
+                                    .join(artifact.to_string()),
+                            );
                         } else {
                             warn!(
                                 "Failed to find local build artifact for {}, required by {}",
@@ -1347,14 +1707,14 @@ impl<'a> PackageBuilder<'a> {
                         }
                     }
                     if let Some(resolved_dep) = resolved_dep {
-                        pkg_deps.push(format!("{}", resolved_dep))
+                        pkg_deps.push(format!("{}", resolved_dep.display()))
                     }
                 }
                 info!(
                     "Building package {} in {} with bootstrap studio, view log at {}",
                     source.display(),
                     repo.display(),
-                    build.build_log_file(&build_id).display()
+                    build.build_log_file(&session_id).display()
                 );
                 tokio::process::Command::new("sudo")
                     .arg("-E")
@@ -1376,7 +1736,7 @@ impl<'a> PackageBuilder<'a> {
                     .arg("-r")
                     .arg(PathBuf::from("/hab").join("studios").join(format!(
                         "{}-{}-{}",
-                        build_id, build.plan.ident.origin, build.plan.ident.name
+                        session_id, build.plan.ident.origin, build.plan.ident.name
                     )))
                     .arg("build")
                     .arg(source)
@@ -1386,7 +1746,7 @@ impl<'a> PackageBuilder<'a> {
                     .env("HAB_STUDIO_SECRET_STUDIO_ENTER", "1")
                     .env(
                         "HAB_STUDIO_SECRET_HAB_OUTPUT_PATH",
-                        build.package_studio_build_folder(&build_id),
+                        build.package_studio_build_folder(&session_id),
                     )
                     .current_dir(repo)
                     .stdin(Stdio::null())
@@ -1400,7 +1760,7 @@ impl<'a> PackageBuilder<'a> {
                     "Building package {} in {} with standard studio, view log at {}",
                     source.display(),
                     repo.display(),
-                    build.build_log_file(&build_id).display()
+                    build.build_log_file(&session_id).display()
                 );
                 tokio::process::Command::new("hab")
                     .arg("pkg")
@@ -1408,7 +1768,7 @@ impl<'a> PackageBuilder<'a> {
                     .arg(source)
                     .env(
                         "HAB_STUDIO_SECRET_OUTPUT_PATH",
-                        build.package_studio_build_folder(&build_id),
+                        build.package_studio_build_folder(&session_id),
                     )
                     .current_dir(repo)
                     .stdin(Stdio::null())
@@ -1458,7 +1818,7 @@ impl<'a> PackageBuilder<'a> {
                     match result {
                         Ok(exit_code) => {
                             if exit_code.success() {
-                                let mut success_file = File::create(build.build_success_file(&build_id)).await.context(format!(
+                                let mut success_file = File::create(build.build_success_file(&session_id)).await.context(format!(
                                     "Failed to create build success file for package '{:?}'",
                                     build.plan
                                 ))?;
@@ -1469,7 +1829,7 @@ impl<'a> PackageBuilder<'a> {
                                 );
                                 return Ok(())
                             } else {
-                                error!(worker = worker_index, "Failed to build {:?}, build process exited with {}, please the build log for errors: {}", build.plan, exit_code, build.build_log_file(&build_id).display());
+                                error!(worker = worker_index, "Failed to build {:?}, build process exited with {}, please the build log for errors: {}", build.plan, exit_code, build.build_log_file(&session_id).display());
                                 return Err(anyhow!("Failed to build {:?}",  build.plan));
                             }
                         }
@@ -1489,12 +1849,14 @@ pub enum NextPackageBuild {
 
 impl Scheduler {
     pub fn new(
-        build_id: String,
+        session_id: String,
         build_order: Arc<Vec<NodeIndex>>,
         dep_graph: Arc<Graph<PackageBuild, ()>>,
+        scripts: Arc<Scripts>,
     ) -> Scheduler {
         Scheduler {
-            build_id,
+            session_id,
+            scripts,
             built_packages: Arc::new(DashSet::new()),
             pending_packages: Arc::new(DashSet::new()),
             build_order,
@@ -1540,11 +1902,12 @@ impl Scheduler {
 
     pub fn thread_start(&self) {
         let built_packages = self.built_packages.clone();
+        let scripts = self.scripts.clone();
         let pending_packages = self.pending_packages.clone();
         let build_order = self.build_order.clone();
         let dep_graph = self.dep_graph.clone();
         let worker_index = self.handles.len() + 1;
-        let build_id = self.build_id.clone();
+        let session_id = self.session_id.clone();
         let handle = tokio::spawn(async move {
             loop {
                 match Scheduler::next(
@@ -1555,13 +1918,13 @@ impl Scheduler {
                 ) {
                     NextPackageBuild::Ready(package_index) => {
                         let build = &dep_graph[package_index];
-                        let builder = PackageBuilder::new(&build_id, worker_index, build);
+                        let builder = PackageBuilder::new(&session_id, worker_index, build);
                         let build_deps = dep_graph
                             .neighbors_directed(package_index, Direction::Outgoing)
                             .into_iter()
                             .map(|dep_index| &dep_graph[dep_index])
                             .collect::<Vec<_>>();
-                        builder.build(build_deps).await?;
+                        builder.build(build_deps, scripts.clone()).await?;
                         Scheduler::mark_complete(built_packages.clone(), package_index);
                     }
                     NextPackageBuild::Waiting => {
