@@ -412,6 +412,26 @@ impl PackageBuild {
                 artifact.to_string(),
                 self.plan.ident
             );
+            // Check if the build artifact was built after all it's dependent artifacts
+            for dep in self.plan.deps.iter().chain(self.plan.build_deps.iter()) {
+                if let Ok(Some(dep_artifact)) =
+                    dep.latest_artifact(self.plan.ident.target, scripts).await
+                {
+                    let dep_modified = tokio::fs::metadata(
+                        PathBuf::from("/hab")
+                            .join("cache")
+                            .join("artifacts")
+                            .join(dep_artifact.to_string()),
+                    )
+                    .await?
+                    .modified()?;
+                    if dep_modified > last_build {
+                        debug!("For {} {}[{:?}] is modified after the last build {}[{:?}], considering it as changed", self.plan.ident, dep_artifact, dep_modified, artifact ,last_build);
+                        return Ok(true);
+                    }
+                }
+            }
+
             Ok(false)
         } else {
             debug!(
