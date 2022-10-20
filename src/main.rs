@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use core::cmp::Ordering;
 use dashmap::DashSet;
@@ -17,7 +18,6 @@ use std::{
     env,
     ffi::OsString,
     fmt::Display,
-    os::unix::prelude::OsStringExt,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -371,34 +371,37 @@ impl PackageBuild {
             {
                 Some((
                     artifact.clone(),
-                    tokio::fs::metadata(
-                        PathBuf::from("/hab")
-                            .join("cache")
-                            .join("artifacts")
-                            .join(artifact.to_string()),
-                    )
-                    .await?
-                    .modified()?,
+                    DateTime::<Utc>::from(
+                        tokio::fs::metadata(
+                            PathBuf::from("/hab")
+                                .join("cache")
+                                .join("artifacts")
+                                .join(artifact.to_string()),
+                        )
+                        .await?
+                        .modified()?,
+                    ),
                 ))
             } else {
                 None
             }
         };
-        if let Some((artifact, last_build)) = last_build {
+        if let Some((artifact, last_build_timestamp)) = last_build {
             let source_folder = self.source_folder();
             let mut next_entries = VecDeque::new();
             next_entries.push_back(source_folder);
             while !next_entries.is_empty() {
                 let current_dir = next_entries.pop_front().unwrap();
                 let metadata = tokio::fs::metadata(current_dir.as_path()).await?;
-                let last_modified = metadata.modified()?;
-                if metadata.is_file() && last_modified > last_build {
-                    debug!("For {} {}[{:?}] is modified after the last build {}[{:?}], considering it as changed", self.plan.ident, current_dir.display(), last_modified, artifact ,last_build);
+                let last_modified_timestamp = DateTime::<Utc>::from(metadata.modified()?);
+
+                if metadata.is_file() && last_modified_timestamp > last_build_timestamp {
+                    debug!("Package {} has a dependency {}[{}] that is modified after the last package build artifact {}[{}], considering it as changed", self.plan.ident, current_dir.display(), last_modified_timestamp, artifact ,last_build_timestamp);
                     return Ok(true);
                 }
                 if metadata.is_dir() {
-                    if last_modified > last_build {
-                        debug!("For {} {}[{:?}] is modified after the last build {}[{:?}], considering it as changed", self.plan.ident, current_dir.display(), last_modified, artifact ,last_build);
+                    if last_modified_timestamp > last_build_timestamp {
+                        debug!("Package {} has a depedency {}[{:?}] that is modified after the last package build artifact {}[{:?}], considering it as changed", self.plan.ident, current_dir.display(), last_modified_timestamp, artifact ,last_build_timestamp);
                         return Ok(true);
                     }
                     let mut read_dir = tokio::fs::read_dir(current_dir.as_path()).await?;
@@ -407,35 +410,28 @@ impl PackageBuild {
                     }
                 }
             }
-            debug!(
-                "Found recent build artifact {} for {}",
-                artifact.to_string(),
-                self.plan.ident
-            );
+
             // Check if the build artifact was built after all it's dependent artifacts
             for dep in self.plan.deps.iter().chain(self.plan.build_deps.iter()) {
                 if let Ok(Some(dep_artifact)) =
                     dep.latest_artifact(self.plan.ident.target, scripts).await
                 {
-                    let dep_modified = tokio::fs::metadata(
-                        PathBuf::from("/hab")
-                            .join("cache")
-                            .join("artifacts")
-                            .join(dep_artifact.to_string()),
-                    )
-                    .await?
-                    .modified()?;
-                    if dep_modified > last_build {
-                        debug!("For {} {}[{:?}] is modified after the last build {}[{:?}], considering it as changed", self.plan.ident, dep_artifact, dep_modified, artifact ,last_build);
+                    if dep_artifact.release > artifact.release {
+                        debug!("Package {} has a dependency build artifact {} that was updated after the last package build artifact {}, considering it as changed", self.plan.ident, dep_artifact,  artifact );
                         return Ok(true);
                     }
                 }
             }
-
+            debug!(
+                "Package {} has a recent build artifact {}[{}], considering it as unchanged",
+                artifact.to_string(),
+                self.plan.ident,
+                last_build_timestamp
+            );
             Ok(false)
         } else {
             debug!(
-                "No build artifact existing for {}, considering it as changed",
+                "Package {} has no recent build artifact, considering it as changed",
                 self.plan.ident
             );
             Ok(true)
@@ -1077,7 +1073,8 @@ impl Scripts {
     pub async fn cache_index(&self, origin: &str, name: &str) -> Result<ArtifactCacheIndex> {
         let output = tokio::process::Command::new("bash")
             .arg(self.script_paths.get("cache_index.sh").unwrap().as_path())
-            .arg(format!("{}-{}", origin, name))
+            .arg(origin)
+            .arg(name)
             .output()
             .await?;
         let cache_data = String::from_utf8_lossy(output.stdout.as_slice());
