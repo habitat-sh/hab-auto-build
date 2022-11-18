@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 use core::cmp::Ordering;
 use dashmap::DashSet;
 use futures::{stream::FuturesUnordered, StreamExt};
+use inquire::{Confirm, MultiSelect};
 use names::{Generator, Name};
 use petgraph::{
     algo::{self, greedy_feedback_arc_set},
@@ -62,7 +63,7 @@ type ArtifactCacheIndex =
     HashMap<String, HashMap<String, BTreeMap<String, HashMap<PackageTarget, BTreeSet<String>>>>>;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Hash, PartialEq, Eq)]
-#[serde(try_from = "String")]
+#[serde(try_from = "String", into = "String")]
 pub enum PackageTarget {
     AArch64Linux,
     AArch64Darwin,
@@ -78,6 +79,12 @@ impl Display for PackageTarget {
             PackageTarget::X86_64Linux => write!(f, "x86_64-linux"),
             PackageTarget::X86_64Windows => write!(f, "x86_64-windows"),
         }
+    }
+}
+
+impl From<PackageTarget> for String {
+    fn from(value: PackageTarget) -> Self {
+        value.to_string()
     }
 }
 
@@ -120,6 +127,7 @@ struct RepoConfiguration {
     pub studio_package: Option<PackageDepIdent>,
     pub native_packages: Option<Vec<String>>,
     pub bootstrap_packages: Option<Vec<String>>,
+    pub ignored_packages: Option<Vec<String>>,
 }
 
 impl HabitatAutoBuildConfiguration {
@@ -179,6 +187,8 @@ struct VisualizeArgs {
     /// Visualize reverse dependencies
     #[arg(short, long)]
     reverse_deps: bool,
+    #[arg(long)]
+    runtime: bool,
     /// Remove cycles in dependencies
     #[arg(short = 'n', long)]
     remove_cycles: bool,
@@ -206,6 +216,23 @@ struct BuildArgs {
     workers: Option<usize>,
     /// List of updated plans
     updated_packages: Vec<String>,
+    /// File containing a list of packages to be skipped
+    #[arg(short = 's', long)]
+    skipped_packages: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PackageSkipList {
+    pub updated_at: DateTime<Utc>,
+    pub packages: Vec<PackageBuildIdent>,
+}
+
+impl PackageSkipList {
+    pub async fn new(skipped_packages: impl AsRef<Path>) -> Result<PackageSkipList> {
+        Ok(serde_json::from_str(
+            &tokio::fs::read_to_string(&skipped_packages).await?,
+        )?)
+    }
 }
 
 struct Repo {
@@ -237,6 +264,22 @@ impl Repo {
         next_dirs.push_back(self.path.clone());
         while !next_dirs.is_empty() {
             let current_dir = next_dirs.pop_front().unwrap();
+            if let Some(ignored_package_patterns) = self.config.ignored_packages.as_ref() {
+                let mut skip_folder = false;
+                for pattern in ignored_package_patterns.iter() {
+                    if let Ok(pattern) = glob::Pattern::new(pattern) {
+                        if pattern.matches_path(current_dir.strip_prefix(self.path.as_path()).unwrap())
+                        {
+                            debug!("Skipping folder {}", current_dir.display());
+                            skip_folder = true;
+                            break;
+                        }
+                    }
+                }
+                if skip_folder {
+                    continue
+                }
+            }
             match PackageSource::new(current_dir.as_path(), self.path.as_path()).await {
                 Ok(package_source) => {
                     debug!("Found package source at {}", current_dir.display());
@@ -362,7 +405,11 @@ impl PackageBuild {
             repo,
         }
     }
-    async fn is_updated(&self, scripts: &Scripts) -> Result<bool> {
+    async fn is_updated(
+        &self,
+        skip_list: Option<&PackageSkipList>,
+        scripts: &Scripts,
+    ) -> Result<Option<UpdateCause>> {
         let last_build = {
             let dep_ident = PackageDepIdent::from(&self.plan.ident);
             if let Ok(Some(artifact)) = dep_ident
@@ -386,7 +433,21 @@ impl PackageBuild {
                 None
             }
         };
+        let skip_timestamp = skip_list.and_then(|skip_list| {
+            if skip_list.packages.contains(&self.plan.ident) {
+                Some(skip_list.updated_at)
+            } else {
+                None
+            }
+        });
+
         if let Some((artifact, last_build_timestamp)) = last_build {
+            let cutoff_timestamp = if let Some(skip_timestamp) = skip_timestamp {
+                skip_timestamp.max(last_build_timestamp)
+            } else {
+                last_build_timestamp
+            };
+            let mut update_cause = None;
             let source_folder = self.source_folder();
             let mut next_entries = VecDeque::new();
             next_entries.push_back(source_folder);
@@ -395,15 +456,17 @@ impl PackageBuild {
                 let metadata = tokio::fs::metadata(current_dir.as_path()).await?;
                 let last_modified_timestamp = DateTime::<Utc>::from(metadata.modified()?);
 
-                if metadata.is_file() && last_modified_timestamp > last_build_timestamp {
-                    debug!("Package {} has a dependency {}[{}] that is modified after the last package build artifact {}[{}], considering it as changed", self.plan.ident, current_dir.display(), last_modified_timestamp, artifact ,last_build_timestamp);
-                    return Ok(true);
-                }
-                if metadata.is_dir() {
-                    if last_modified_timestamp > last_build_timestamp {
-                        debug!("Package {} has a depedency {}[{:?}] that is modified after the last package build artifact {}[{:?}], considering it as changed", self.plan.ident, current_dir.display(), last_modified_timestamp, artifact ,last_build_timestamp);
-                        return Ok(true);
+                if last_modified_timestamp > cutoff_timestamp {
+                    if let Some(skip_timestamp) = skip_timestamp {
+                        debug!("Package {} has a dependency {} [{}] that is modified after the last package build artifact {} [{}] and skip list timestamp [{}]", self.plan.ident, current_dir.display(), last_modified_timestamp, artifact ,last_build_timestamp, skip_timestamp);
+                    } else {
+                        debug!("Package {} has a dependency {} [{}] that is modified after the last package build artifact {} [{}]", self.plan.ident, current_dir.display(), last_modified_timestamp, artifact ,last_build_timestamp);
                     }
+                    update_cause = Some(UpdateCause::UpdatedSource);
+                    break;
+                }
+
+                if metadata.is_dir() {
                     let mut read_dir = tokio::fs::read_dir(current_dir.as_path()).await?;
                     while let Some(dir) = read_dir.next_entry().await? {
                         next_entries.push_back(dir.path());
@@ -418,23 +481,24 @@ impl PackageBuild {
                 {
                     if dep_artifact.release > artifact.release {
                         debug!("Package {} has a dependency build artifact {} that was updated after the last package build artifact {}, considering it as changed", self.plan.ident, dep_artifact,  artifact );
-                        return Ok(true);
+                        update_cause = Some(UpdateCause::UpdatedDependency);
+                        break
                     }
                 }
             }
             debug!(
-                "Package {} has a recent build artifact {}[{}], considering it as unchanged",
+                "Package {} has a recent build artifact {} [{}], considering it as unchanged",
                 artifact.to_string(),
                 self.plan.ident,
                 last_build_timestamp
             );
-            Ok(false)
+            Ok(update_cause)
         } else {
             debug!(
                 "Package {} has no recent build artifact, considering it as changed",
                 self.plan.ident
             );
-            Ok(true)
+            Ok(Some(UpdateCause::NoArtifact))
         }
     }
     fn repo_build_folder(&self, session_id: &str) -> PathBuf {
@@ -733,7 +797,7 @@ impl PartialOrd for PackageBuildIdent {
 impl std::fmt::Display for PackageBuildIdent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.version.is_empty() {
-            write!(f, "{}/{}", self.origin, self.name)
+            write!(f, "{}/{}/DYNAMIC", self.origin, self.name)
         } else {
             write!(f, "{}/{}/{}", self.origin, self.name, self.version)
         }
@@ -838,10 +902,10 @@ impl PackageDepIdent {
     }
 }
 
-impl TryFrom<String> for PackageDepIdent {
+impl TryFrom<&str> for PackageDepIdent {
     type Error = anyhow::Error;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         let mut origin = None;
         let mut name = None;
         let mut version = None;
@@ -861,6 +925,14 @@ impl TryFrom<String> for PackageDepIdent {
             version,
             release,
         })
+    }
+}
+
+impl TryFrom<String> for PackageDepIdent {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        PackageDepIdent::try_from(value.as_str())
     }
 }
 
@@ -1120,16 +1192,24 @@ impl Scripts {
     }
 }
 
+#[derive(Debug)]
+pub enum UpdateCause {
+    UpdatedSource,
+    UpdatedDependency,
+    NoArtifact,
+}
+
 async fn dep_graph_build(
     start_package_idents: Vec<PackageDepIdent>,
     end_package_idents: Vec<PackageDepIdent>,
     auto_build_config: HabitatAutoBuildConfiguration,
     detect_updates: bool,
+    skip_list: Option<&PackageSkipList>,
     scripts: Arc<Scripts>,
 ) -> Result<(
     Graph<PackageBuild, ()>,
     Vec<NodeIndex>,
-    Vec<NodeIndex>,
+    Vec<(NodeIndex, UpdateCause)>,
     Vec<NodeIndex>,
 )> {
     let mut dep_graph = Graph::new();
@@ -1157,13 +1237,13 @@ async fn dep_graph_build(
                 .await?;
             let build = PackageBuild::new(repo.clone(), metadata.clone());
             let build_is_updated = if detect_updates {
-                build.is_updated(&scripts).await?
+                build.is_updated(skip_list, &scripts).await?
             } else {
-                false
+                None
             };
             let node = dep_graph.add_node(build);
-            if build_is_updated {
-                updated_package_nodes.push(node);
+            if let Some(update_cause) = build_is_updated {
+                updated_package_nodes.push((node, update_cause));
             }
             if repo
                 .config
@@ -1194,7 +1274,17 @@ async fn dep_graph_build(
                 sink_package_nodes.push(node);
             }
 
-            packages.insert(metadata.ident.clone(), (node, metadata.clone()));
+            if let Some((_, existing_package)) =
+                packages.insert(metadata.ident.clone(), (node, metadata.clone()))
+            {
+                error!(
+                    "Found a package {} which a plan at {} and a duplicate plan at {}",
+                    metadata.ident,
+                    metadata.path.display(),
+                    existing_package.path.display()
+                );
+                return Err(anyhow!("Duplicate package detected"));
+            };
         }
 
         for (ident, (node, metadata)) in packages.iter() {
@@ -1246,12 +1336,12 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
     let start_package_idents = args
         .start_packages
         .into_iter()
-        .map(|value| PackageDepIdent::try_from(value))
+        .map(PackageDepIdent::try_from)
         .collect::<Result<Vec<PackageDepIdent>, _>>()?;
     let end_package_idents = if let Some(end_packages) = args.end_packages {
         end_packages
             .into_iter()
-            .map(|value| PackageDepIdent::try_from(value))
+            .map(PackageDepIdent::try_from)
             .collect::<Result<Vec<PackageDepIdent>, _>>()?
     } else {
         Vec::new()
@@ -1268,6 +1358,7 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
         end_package_idents,
         auto_build_config,
         false,
+        None,
         scripts,
     )
     .await?;
@@ -1363,13 +1454,13 @@ async fn analyze(args: AnalyzeArgs) -> Result<()> {
     let start_package_idents = args
         .start_packages
         .into_iter()
-        .map(|value| PackageDepIdent::try_from(value))
+        .map(PackageDepIdent::try_from)
         .collect::<Result<Vec<PackageDepIdent>, _>>()?;
 
     let end_package_idents = if let Some(end_packages) = args.end_packages {
         end_packages
             .into_iter()
-            .map(|value| PackageDepIdent::try_from(value))
+            .map(PackageDepIdent::try_from)
             .collect::<Result<Vec<PackageDepIdent>, _>>()?
     } else {
         Vec::new()
@@ -1386,6 +1477,7 @@ async fn analyze(args: AnalyzeArgs) -> Result<()> {
         end_package_idents,
         auto_build_config,
         false,
+        None,
         scripts,
     )
     .await?;
@@ -1490,7 +1582,7 @@ async fn build(args: BuildArgs) -> Result<()> {
     let manually_updated_package_idents = args
         .updated_packages
         .into_iter()
-        .map(|value| PackageDepIdent::try_from(value))
+        .map(PackageDepIdent::try_from)
         .collect::<Result<Vec<PackageDepIdent>, _>>()?;
 
     let auto_build_config = HabitatAutoBuildConfiguration::new(
@@ -1500,26 +1592,92 @@ async fn build(args: BuildArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, manually_updated_package_nodes, updated_package_nodes, _) = dep_graph_build(
-        manually_updated_package_idents,
-        Vec::new(),
-        auto_build_config,
-        true,
-        scripts.clone(),
-    )
-    .await?;
+    let package_skip_list = if let Some(path) = args.skipped_packages {
+        Some(PackageSkipList::new(path).await?)
+    } else {
+        None
+    };
 
-    for updated_package_node in updated_package_nodes.iter() {
+    let (dep_graph, manually_updated_package_nodes, mut updated_package_nodes, _) =
+        dep_graph_build(
+            manually_updated_package_idents,
+            Vec::new(),
+            auto_build_config,
+            true,
+            package_skip_list.as_ref(),
+            scripts.clone(),
+        )
+        .await?;
+
+    for (updated_package_node, _) in updated_package_nodes.iter() {
         info!(
             "Detected changes in {} at {}",
             dep_graph[*updated_package_node].plan.ident,
             dep_graph[*updated_package_node].plan.source.display()
         );
     }
+    if !updated_package_nodes.is_empty() {
+        let skip_packages = Confirm::new("Do you want to skip the build of certain updated packages?")
+        .with_default(false)
+        .with_help_message("This is useful to avoid rebuilding packages that have only trivial formatting, styling changes")
+        .prompt()?;
+        if skip_packages {
+            let mut skipped_packages = package_skip_list
+                .map_or(Vec::new(), |skip_list| skip_list.packages)
+                .into_iter()
+                .filter(|skipped_package| {
+                    !updated_package_nodes
+                        .iter()
+                        .any(|(updated_package_node_index, _)| {
+                            &dep_graph[*updated_package_node_index].plan.ident == skipped_package
+                        })
+                })
+                .collect::<Vec<_>>();
+            let default_skipped_packages = skipped_packages
+                .iter()
+                .enumerate()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+
+            for (updated_package_node, update_cause) in updated_package_nodes.iter() {
+                if !matches!(update_cause, UpdateCause::UpdatedDependency) {
+                    let build_ident = dep_graph[*updated_package_node].plan.ident.clone();
+                    if !skipped_packages.contains(&build_ident) {
+                        debug!("Adding {:?} to {:?} due to {:?}", build_ident, skip_packages, update_cause);
+                        skipped_packages.push(build_ident);
+                    }
+                }
+            }
+            let skipped_packages =
+                MultiSelect::new("Select the packages to be skipped:", skipped_packages)
+                    .with_default(&default_skipped_packages)
+                    .prompt()?;
+
+            updated_package_nodes.retain(|(package_index, _)| {
+                !skipped_packages.contains(&dep_graph[*package_index].plan.ident)
+            });
+
+            let save_skip_list =
+                Confirm::new("Do you want to save the list of packages to be skipped?")
+                    .with_default(false)
+                    .with_help_message("This is useful to when you rebuild multiple times")
+                    .prompt()?;
+            if save_skip_list {
+                tokio::fs::write(
+                    "package_skip_list",
+                    serde_json::to_string_pretty(&PackageSkipList {
+                        updated_at: Utc::now(),
+                        packages: skipped_packages,
+                    })?,
+                )
+                .await?;
+            }
+        }
+    }
 
     let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
         let mut is_affected = false;
-        for updated_package_node in updated_package_nodes.iter() {
+        for (updated_package_node, _) in updated_package_nodes.iter() {
             if !manually_updated_package_nodes.is_empty() {
                 let mut should_include = false;
                 for manually_updated_package_node in manually_updated_package_nodes.iter() {
@@ -1550,7 +1708,7 @@ async fn build(args: BuildArgs) -> Result<()> {
     build_order.reverse();
     let build_order = Arc::new(build_order);
 
-    debug!(
+    info!(
         "Build order: {:?}",
         build_order
             .iter()
@@ -1752,8 +1910,8 @@ impl<'a> PackageBuilder<'a> {
                     .arg("bootstrap")
                     .arg("-r")
                     .arg(PathBuf::from("/hab").join("studios").join(format!(
-                        "{}-{}-{}",
-                        session_id, build.plan.ident.origin, build.plan.ident.name
+                        "hab-auto-build-{}",
+                        session_id,
                     )))
                     .arg("build")
                     .arg(source)
