@@ -1,6 +1,8 @@
+mod server;
+
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use core::cmp::Ordering;
 use dashmap::DashSet;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -10,7 +12,7 @@ use petgraph::{
     algo::{self, greedy_feedback_arc_set},
     dot::{Config, Dot},
     stable_graph::{EdgeIndex, NodeIndex},
-    visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences, NodeFiltered},
+    visit::{EdgeRef, IntoNodeReferences, NodeFiltered},
     Direction, Graph,
 };
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,7 @@ use std::{
     env,
     ffi::OsString,
     fmt::Display,
+    ops::Deref,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -47,13 +50,19 @@ lazy_static::lazy_static! {
 
     ];
     static ref HAB_PKGS_PATH: PathBuf = {
-        let mut path = PathBuf::from("/hab");
+        let path = PathBuf::from("/hab");
         path.join("pkgs")
     };
     static ref PLAN_FILE_NAME: OsString =  OsString::from("plan.sh");
     static ref HAB_DEFAULT_BOOTSTRAP_STUDIO_PACKAGE: PackageDepIdent = PackageDepIdent {
         origin: String::from("core"),
         name: String::from("build-tools-hab-studio"),
+        version: None,
+        release: None,
+    };
+    static ref HAB_DEFAULT_STUDIO_PACKAGE: PackageDepIdent = PackageDepIdent {
+        origin: String::from("core"),
+        name: String::from("hab-studio"),
         version: None,
         release: None,
     };
@@ -68,7 +77,26 @@ pub enum PackageTarget {
     AArch64Linux,
     AArch64Darwin,
     X86_64Linux,
+    X86_64Darwin,
     X86_64Windows,
+}
+
+impl Default for PackageTarget {
+    fn default() -> Self {
+        if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            PackageTarget::AArch64Linux
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            PackageTarget::X86_64Linux
+        } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            PackageTarget::X86_64Windows
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            PackageTarget::X86_64Darwin
+        } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            PackageTarget::AArch64Darwin
+        } else {
+            panic!("Target platform does not support habitat packages")
+        }
+    }
 }
 
 impl Display for PackageTarget {
@@ -77,6 +105,7 @@ impl Display for PackageTarget {
             PackageTarget::AArch64Linux => write!(f, "aarch64-linux"),
             PackageTarget::AArch64Darwin => write!(f, "aarch64-darwin"),
             PackageTarget::X86_64Linux => write!(f, "x86_64-linux"),
+            PackageTarget::X86_64Darwin => write!(f, "x86_64-darwin"),
             PackageTarget::X86_64Windows => write!(f, "x86_64-windows"),
         }
     }
@@ -96,6 +125,7 @@ impl TryFrom<&str> for PackageTarget {
             "aarch64-linux" => Ok(PackageTarget::AArch64Linux),
             "aarch64-darwin" => Ok(PackageTarget::AArch64Darwin),
             "x86_64-linux" => Ok(PackageTarget::X86_64Linux),
+            "x86_64-darwin" => Ok(PackageTarget::X86_64Darwin),
             "x86_64-windows" => Ok(PackageTarget::X86_64Windows),
             _ => Err(anyhow!("Unknown package target '{}'", value)),
         }
@@ -117,25 +147,27 @@ const HAB_AUTO_BUILD_EXTRACT_SOURCE_FILES: [(&str, &[u8]); 2] = [
 
 #[derive(Debug, Deserialize, Serialize)]
 struct HabitatAutoBuildConfiguration {
-    pub repos: Vec<RepoConfiguration>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct RepoConfiguration {
-    pub source: PathBuf,
     pub bootstrap_studio_package: Option<PackageDepIdent>,
     pub studio_package: Option<PackageDepIdent>,
+    pub repos: Vec<RepoConfiguration>,
+    #[serde(skip)]
+    pub config_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct RepoConfiguration {
+    pub source: PathBuf,
     pub native_packages: Option<Vec<String>>,
-    pub bootstrap_packages: Option<Vec<String>>,
     pub ignored_packages: Option<Vec<String>>,
 }
 
 impl HabitatAutoBuildConfiguration {
     pub async fn new(config_path: impl AsRef<Path>) -> Result<HabitatAutoBuildConfiguration> {
-        Ok(
-            serde_json::from_slice(tokio::fs::read(config_path).await?.as_ref())
-                .context("Failed to read hab auto build configuration")?,
-        )
+        let mut config: HabitatAutoBuildConfiguration =
+            serde_json::from_slice(tokio::fs::read(config_path.as_ref()).await?.as_ref())
+                .context("Failed to read hab auto build configuration")?;
+        config.config_path = config_path.as_ref().to_path_buf();
+        Ok(config)
     }
 }
 
@@ -155,6 +187,25 @@ enum Commands {
     Visualize(VisualizeArgs),
     /// Analyze dependencies between a set of packages
     Analyze(AnalyzeArgs),
+    /// Start a server to interactively explore packages
+    Server(ServerArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DependencyAnalysis {
+    Build,
+    Runtime,
+    Reverse,
+}
+
+#[derive(Debug, Args)]
+struct ServerArgs {
+    /// Path to hab auto build configuration
+    #[arg(short, long)]
+    config_path: Option<PathBuf>,
+    /// HTTP port to listen on
+    #[arg(short, long)]
+    port: u16,
 }
 
 #[derive(Debug, Args)]
@@ -162,18 +213,12 @@ struct AnalyzeArgs {
     /// Path to hab auto build configuration
     #[arg(short, long)]
     config_path: Option<PathBuf>,
-    /// Visualize reverse dependencies
+    /// Type of dependencies to analyze
+    #[arg(value_enum, short = 't', long)]
+    analysis_type: DependencyAnalysis,
+    /// List of packages to analyze
     #[arg(short, long)]
-    reverse_deps: bool,
-    /// Remove cycles in dependencies
-    #[arg(short = 'n', long)]
-    remove_cycles: bool,
-    /// List of plans to start analysis
-    #[arg(short, long)]
-    start_packages: Vec<String>,
-    /// List of plans to end analysis
-    #[arg(short, long)]
-    end_packages: Option<Vec<String>>,
+    packages: Vec<String>,
     /// Analysis output file
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -184,20 +229,12 @@ struct VisualizeArgs {
     /// Path to hab auto build configuration
     #[arg(short, long)]
     config_path: Option<PathBuf>,
-    /// Visualize reverse dependencies
+    /// Type of dependencies to visualize
+    #[arg(value_enum, short = 't', long)]
+    analysis_type: DependencyAnalysis,
+    /// List of packages to visualize
     #[arg(short, long)]
-    reverse_deps: bool,
-    #[arg(long)]
-    runtime: bool,
-    /// Remove cycles in dependencies
-    #[arg(short = 'n', long)]
-    remove_cycles: bool,
-    /// List of plans to start analysis
-    #[arg(short, long)]
-    start_packages: Vec<String>,
-    /// List of plans to end analysis
-    #[arg(short, long)]
-    end_packages: Option<Vec<String>>,
+    packages: Vec<String>,
     /// Dependency graph output file
     #[arg(short, long)]
     output: PathBuf,
@@ -216,9 +253,6 @@ struct BuildArgs {
     workers: Option<usize>,
     /// List of updated plans
     updated_packages: Vec<String>,
-    /// File containing a list of packages to be skipped
-    #[arg(short = 's', long)]
-    skipped_packages: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -241,8 +275,21 @@ struct Repo {
 }
 
 impl Repo {
-    pub async fn new(config: RepoConfiguration) -> Result<Repo> {
-        let path = config.source.canonicalize()?;
+    pub async fn new(config: RepoConfiguration, config_path: impl AsRef<Path>) -> Result<Repo> {
+        debug!(
+            "Loading Habitat Auto Build configuration at {}",
+            config_path.as_ref().canonicalize()?.display()
+        );
+        let path = if config.source.is_absolute() {
+            config.source.canonicalize()?
+        } else {
+            config_path
+                .as_ref()
+                .parent()
+                .unwrap()
+                .join(config.source.as_path())
+                .canonicalize()?
+        };
         let metadata = tokio::fs::metadata(&path).await.with_context(|| {
             format!(
                 "Failed to read file system metadata for '{}'",
@@ -268,7 +315,8 @@ impl Repo {
                 let mut skip_folder = false;
                 for pattern in ignored_package_patterns.iter() {
                     if let Ok(pattern) = glob::Pattern::new(pattern) {
-                        if pattern.matches_path(current_dir.strip_prefix(self.path.as_path()).unwrap())
+                        if pattern
+                            .matches_path(current_dir.strip_prefix(self.path.as_path()).unwrap())
                         {
                             debug!("Skipping folder {}", current_dir.display());
                             skip_folder = true;
@@ -277,7 +325,7 @@ impl Repo {
                     }
                 }
                 if skip_folder {
-                    continue
+                    continue;
                 }
             }
             match PackageSource::new(current_dir.as_path(), self.path.as_path()).await {
@@ -309,7 +357,6 @@ impl Repo {
 #[serde(try_from = "String", into = "String")]
 pub enum PackageType {
     Native,
-    Bootstrap,
     Standard,
 }
 
@@ -319,7 +366,6 @@ impl TryFrom<String> for PackageType {
     fn try_from(value: String) -> Result<Self, Self::Error> {
         match value.as_str() {
             "native" => Ok(PackageType::Native),
-            "bootstrap" => Ok(PackageType::Bootstrap),
             "standard" => Ok(PackageType::Standard),
             _ => Err(anyhow!("Unknown package type: {}", value)),
         }
@@ -330,17 +376,49 @@ impl From<PackageType> for String {
     fn from(value: PackageType) -> Self {
         match value {
             PackageType::Native => String::from("native"),
-            PackageType::Bootstrap => String::from("bootstrap"),
             PackageType::Standard => String::from("standard"),
         }
     }
 }
 
-#[derive(Clone)]
-struct PackageBuild {
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum PackageStudioType {
+    Native,
+    Bootstrap,
+    Standard,
+}
+
+impl TryFrom<String> for PackageStudioType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "native" => Ok(PackageStudioType::Native),
+            "bootstrap" => Ok(PackageStudioType::Bootstrap),
+            "standard" => Ok(PackageStudioType::Standard),
+            _ => Err(anyhow!("Unknown package type: {}", value)),
+        }
+    }
+}
+
+impl From<PackageStudioType> for String {
+    fn from(value: PackageStudioType) -> Self {
+        match value {
+            PackageStudioType::Native => String::from("native"),
+            PackageStudioType::Bootstrap => String::from("bootstrap"),
+            PackageStudioType::Standard => String::from("standard"),
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct PackageBuild {
     pub plan: PlanMetadata,
     pub package_type: PackageType,
-    pub repo: Arc<Repo>,
+    pub studio_type: Option<PackageStudioType>,
+    #[serde(skip)]
+    repo: Arc<Repo>,
 }
 
 impl std::fmt::Debug for PackageBuild {
@@ -351,7 +429,6 @@ impl std::fmt::Debug for PackageBuild {
             match &self.package_type {
                 PackageType::Standard => "",
                 PackageType::Native => "native:",
-                PackageType::Bootstrap => "bootstrap:",
             },
             self.plan
         )
@@ -377,31 +454,10 @@ impl PackageBuild {
                 }
             }
         }
-        if let Some(bootstrap_package_patterns) = repo.config.bootstrap_packages.as_ref() {
-            for pattern in bootstrap_package_patterns.iter() {
-                if let Ok(pattern) = glob::Pattern::new(pattern) {
-                    if pattern.matches_path(plan.source.strip_prefix(plan.repo.as_path()).unwrap())
-                    {
-                        if matches!(package_type, PackageType::Native) {
-                            warn!(
-                                "Package '{}' matches both bootstrap and native package pattern, considering it as a bootstrap package",
-                                plan.ident
-                            );
-                        }
-                        package_type = PackageType::Bootstrap
-                    }
-                } else {
-                    warn!(
-                        "Invalid pattern '{}' for matching bootstrap packages in '{}'",
-                        pattern,
-                        repo.path.display()
-                    );
-                }
-            }
-        }
         PackageBuild {
             plan,
             package_type,
+            studio_type: None,
             repo,
         }
     }
@@ -482,7 +538,7 @@ impl PackageBuild {
                     if dep_artifact.release > artifact.release {
                         debug!("Package {} has a dependency build artifact {} that was updated after the last package build artifact {}, considering it as changed", self.plan.ident, dep_artifact,  artifact );
                         update_cause = Some(UpdateCause::UpdatedDependency);
-                        break
+                        break;
                     }
                 }
             }
@@ -664,9 +720,9 @@ impl PartialOrd for PackageArtifactIdent {
                         Some(Ordering::Less) => Some(Ordering::Less),
                         _ => None,
                     },
-                    ord => None,
+                    _ord => None,
                 },
-                ord => None,
+                _ord => None,
             },
             false => None,
         }
@@ -785,9 +841,9 @@ impl PartialOrd for PackageBuildIdent {
             true => match self.origin.partial_cmp(&other.origin) {
                 Some(Ordering::Equal) => match self.name.partial_cmp(&other.name) {
                     Some(Ordering::Equal) => self.version.partial_cmp(&other.version),
-                    ord => None,
+                    _ord => None,
                 },
-                ord => None,
+                _ord => None,
             },
             false => None,
         }
@@ -1192,6 +1248,81 @@ impl Scripts {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub enum DependencyType {
+    Runtime,
+    Build,
+    Studio,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageDependencyGraph(Graph<PackageBuild, DependencyType>);
+
+impl PackageDependencyGraph {
+    pub fn new() -> PackageDependencyGraph {
+        PackageDependencyGraph(Graph::new())
+    }
+    pub fn package(&self, node: &PackageNode) -> &PackageBuild {
+        &self.0[**node]
+    }
+    pub fn package_mut(&mut self, node: &PackageNode) -> &mut PackageBuild {
+        &mut self.0[**node]
+    }
+    pub fn add_package(&mut self, package_build: PackageBuild) -> PackageNode {
+        PackageNode(self.0.add_node(package_build))
+    }
+    pub fn add_runtime_dependency(&mut self, source: PackageNode, target: PackageNode) {
+        self.0.add_edge(source.0, target.0, DependencyType::Runtime);
+    }
+    pub fn add_build_dependency(&mut self, source: PackageNode, target: PackageNode) {
+        self.0.add_edge(source.0, target.0, DependencyType::Build);
+    }
+    pub fn add_studio_dependency(&mut self, source: PackageNode, target: PackageNode) {
+        self.0.add_edge(source.0, target.0, DependencyType::Studio);
+    }
+    pub fn remove_dependency(&mut self, edge_index: EdgeIndex) {
+        self.0.remove_edge(edge_index).unwrap();
+    }
+    pub fn into_inner(self) -> Graph<PackageBuild, DependencyType> {
+        self.0
+    }
+}
+
+impl Deref for PackageDependencyGraph {
+    type Target = Graph<PackageBuild, DependencyType>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PackageNode(NodeIndex);
+
+impl PackageNode {
+    pub fn is_dependency_of(&self, graph: &PackageDependencyGraph, other: &PackageNode) -> bool {
+        algo::has_path_connecting(&graph.0, other.0, self.0, None)
+    }
+    pub fn is_reverse_dependency_of(
+        &self,
+        graph: &PackageDependencyGraph,
+        other: &PackageNode,
+    ) -> bool {
+        algo::has_path_connecting(&graph.0, self.0, other.0, None)
+    }
+}
+
+impl Deref for PackageNode {
+    type Target = NodeIndex;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct PackageNodeUpdate {
+    package: PackageNode,
+    cause: UpdateCause,
+}
+
 #[derive(Debug)]
 pub enum UpdateCause {
     UpdatedSource,
@@ -1199,41 +1330,64 @@ pub enum UpdateCause {
     NoArtifact,
 }
 
+impl Display for UpdateCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateCause::UpdatedSource => write!(f, "updated source"),
+            UpdateCause::UpdatedDependency => write!(f, "updated dependency"),
+            UpdateCause::NoArtifact => write!(f, "no build artifact"),
+        }
+    }
+}
+
+pub struct StudioPackages {
+    bootstrap_studio: Option<PackageNode>,
+    studio: Option<PackageNode>,
+}
+
 async fn dep_graph_build(
     start_package_idents: Vec<PackageDepIdent>,
-    end_package_idents: Vec<PackageDepIdent>,
-    auto_build_config: HabitatAutoBuildConfiguration,
+    auto_build_config: &HabitatAutoBuildConfiguration,
     detect_updates: bool,
     skip_list: Option<&PackageSkipList>,
     scripts: Arc<Scripts>,
 ) -> Result<(
-    Graph<PackageBuild, ()>,
-    Vec<NodeIndex>,
-    Vec<(NodeIndex, UpdateCause)>,
-    Vec<NodeIndex>,
+    PackageDependencyGraph,
+    Vec<PackageNode>,
+    Vec<PackageNodeUpdate>,
+    StudioPackages,
 )> {
-    let mut dep_graph = Graph::new();
+    let mut dep_graph = PackageDependencyGraph::new();
     let mut packages = HashMap::new();
     let mut source_package_nodes = Vec::new();
-    let mut sink_package_nodes = Vec::new();
     let mut updated_package_nodes = Vec::new();
 
-    for repo_config in auto_build_config.repos {
+    let mut studio_packages = StudioPackages {
+        bootstrap_studio: None,
+        studio: None,
+    };
+
+    for repo_config in auto_build_config.repos.iter() {
+        let repo = Arc::new(
+            Repo::new(
+                (*repo_config).clone(),
+                auto_build_config.config_path.as_path(),
+            )
+            .await?,
+        );
         info!(
             "Scanning directory '{}' for Habitat plans",
-            repo_config.source.display()
+            repo.path.display()
         );
-        let repo = Arc::new(Repo::new(repo_config).await?);
         let package_sources = repo.scan().await?;
         if package_sources.is_empty() {
             info!("No Habitat plans found in {}", repo.path.display());
             continue;
         }
-        let mut bootstrap_studio_package_node = None;
-        let mut studio_package_node = None;
+
         for package_source in package_sources {
             let metadata = package_source
-                .metadata(PackageTarget::AArch64Linux, &scripts)
+                .metadata(PackageTarget::default(), &scripts)
                 .await?;
             let build = PackageBuild::new(repo.clone(), metadata.clone());
             let build_is_updated = if detect_updates {
@@ -1241,37 +1395,32 @@ async fn dep_graph_build(
             } else {
                 None
             };
-            let node = dep_graph.add_node(build);
+            let node = dep_graph.add_package(build);
             if let Some(update_cause) = build_is_updated {
-                updated_package_nodes.push((node, update_cause));
+                updated_package_nodes.push(PackageNodeUpdate {
+                    package: node,
+                    cause: update_cause,
+                });
             }
-            if repo
-                .config
+            if auto_build_config
                 .bootstrap_studio_package
                 .as_ref()
                 .map_or(false, |package| package.matches_build(&metadata.ident))
             {
-                bootstrap_studio_package_node = Some(node);
+                studio_packages.bootstrap_studio = Some(node);
             }
-            if repo
-                .config
+            if auto_build_config
                 .studio_package
                 .as_ref()
                 .map_or(false, |package| package.matches_build(&metadata.ident))
             {
-                studio_package_node = Some(node);
+                studio_packages.studio = Some(node);
             }
             if start_package_idents
                 .iter()
                 .any(|ident| ident.matches_build(&metadata.ident))
             {
                 source_package_nodes.push(node);
-            }
-            if end_package_idents
-                .iter()
-                .any(|ident| ident.matches_build(&metadata.ident))
-            {
-                sink_package_nodes.push(node);
             }
 
             if let Some((_, existing_package)) =
@@ -1287,21 +1436,10 @@ async fn dep_graph_build(
             };
         }
 
-        for (ident, (node, metadata)) in packages.iter() {
-            match (
-                &dep_graph[*node].package_type,
-                bootstrap_studio_package_node.as_ref(),
-                studio_package_node.as_ref(),
-            ) {
-                (PackageType::Bootstrap, Some(studio_node), _)
-                | (PackageType::Standard, _, Some(studio_node)) => {
-                    dep_graph.add_edge(*node, *studio_node, ());
-                }
-                _ => {}
-            }
-            for dep in metadata.build_deps.iter().chain(metadata.deps.iter()) {
+        for (_ident, (node, metadata)) in packages.iter() {
+            for dep in metadata.build_deps.iter() {
                 let mut dep_package = None;
-                for (dep_ident, (dep_node, dep_metadata)) in packages.iter() {
+                for (dep_ident, (dep_node, _dep_metadata)) in packages.iter() {
                     if dep.matches_build(dep_ident) {
                         if let Some(dep_version) = dep.version.as_ref() {
                             if &dep_ident.version == dep_version {
@@ -1318,34 +1456,103 @@ async fn dep_graph_build(
                     }
                 }
                 if let Some((_, dep_node)) = dep_package {
-                    dep_graph.add_edge(*node, *dep_node, ());
+                    dep_graph.add_build_dependency(*node, *dep_node);
                 }
             }
+            for dep in metadata.deps.iter() {
+                let mut dep_package = None;
+                for (dep_ident, (dep_node, _dep_metadata)) in packages.iter() {
+                    if dep.matches_build(dep_ident) {
+                        if let Some(dep_version) = dep.version.as_ref() {
+                            if &dep_ident.version == dep_version {
+                                dep_package = Some((dep_ident, dep_node));
+                                break;
+                            }
+                        } else if let Some((existing_dep_ident, _)) = dep_package {
+                            if dep_ident > existing_dep_ident {
+                                dep_package = Some((dep_ident, dep_node));
+                            }
+                        } else {
+                            dep_package = Some((dep_ident, dep_node));
+                        }
+                    }
+                }
+                if let Some((_, dep_node)) = dep_package {
+                    dep_graph.add_runtime_dependency(*node, *dep_node);
+                }
+            }
+        }
+        for (_ident, (node, metadata)) in packages.iter() {
+            dep_graph.package_mut(node).studio_type = match dep_graph.package(node).package_type {
+                PackageType::Native => Some(PackageStudioType::Native),
+                PackageType::Standard => match &studio_packages.studio {
+                    Some(studio_package) => match node.is_dependency_of(&dep_graph, studio_package)
+                    {
+                        true => match &studio_packages.bootstrap_studio {
+                            Some(bootstrap_studio_package) => {
+                                match node.is_dependency_of(&dep_graph, &bootstrap_studio_package) {
+                                    true => {
+                                        error!("Cannot build {} dependency in a studio or a bootstrap studio as it is a dependency of both of them, maybe it should be a native package", _ident);
+                                        None
+                                    }
+                                    false => {
+                                        dep_graph.add_studio_dependency(
+                                            *node,
+                                            *bootstrap_studio_package,
+                                        );
+                                        Some(PackageStudioType::Bootstrap)
+                                    }
+                                }
+                            }
+                            None => {
+                                error!("Cannot build {} dependency in studio as it is required to build a studio, maybe you should provide a bootstrap studio package to build it", _ident);
+                                None
+                            }
+                        },
+                        false => {
+                            dep_graph.add_studio_dependency(*node, *studio_package);
+                            Some(PackageStudioType::Standard)
+                        }
+                    },
+                    None => match &studio_packages.bootstrap_studio {
+                        Some(bootstrap_studio_package) => {
+                            match node.is_dependency_of(&dep_graph, &bootstrap_studio_package) {
+                                true => {
+                                    error!("Cannot build {} dependency in a bootstrap studio as it is a dependency of the bootstrap studio, maybe it should be a native package", _ident);
+                                    None
+                                }
+                                false => {
+                                    dep_graph
+                                        .add_studio_dependency(*node, *bootstrap_studio_package);
+                                    Some(PackageStudioType::Bootstrap)
+                                }
+                            }
+                        }
+                        None => {
+                            error!("Cannot build {} dependency as no studio or bootstrap studio package has been provided, maybe you should provide a bootstrap studio package to build it", _ident);
+                            None
+                        }
+                    },
+                },
+            };
         }
     }
     Ok((
         dep_graph,
         source_package_nodes,
         updated_package_nodes,
-        sink_package_nodes,
+        studio_packages,
     ))
 }
 
 async fn visualize(args: VisualizeArgs) -> Result<()> {
     let scripts = Arc::new(Scripts::new().await?);
-    let start_package_idents = args
-        .start_packages
+    let selected_packages = args
+        .packages
         .into_iter()
         .map(PackageDepIdent::try_from)
         .collect::<Result<Vec<PackageDepIdent>, _>>()?;
-    let end_package_idents = if let Some(end_packages) = args.end_packages {
-        end_packages
-            .into_iter()
-            .map(PackageDepIdent::try_from)
-            .collect::<Result<Vec<PackageDepIdent>, _>>()?
-    } else {
-        Vec::new()
-    };
+
     let auto_build_config = HabitatAutoBuildConfiguration::new(
         args.config_path
             .unwrap_or(env::current_dir()?.join("hab-auto-build.json")),
@@ -1353,88 +1560,37 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, start_package_nodes, _, end_package_nodes) = dep_graph_build(
-        start_package_idents,
-        end_package_idents,
-        auto_build_config,
-        false,
-        None,
-        scripts,
-    )
-    .await?;
+    let (dep_graph, selected_package_nodes, _, _) =
+        dep_graph_build(selected_packages, &auto_build_config, false, None, scripts).await?;
 
     let output = {
-        let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
-            let mut include = true;
-            for start_package_node in start_package_nodes.iter() {
-                if args.reverse_deps {
-                    if !algo::has_path_connecting(&dep_graph, node, *start_package_node, None) {
-                        include = false;
-                        break;
-                    }
-                } else {
-                    if !algo::has_path_connecting(&dep_graph, *start_package_node, node, None) {
-                        include = false;
-                        break;
-                    }
-                }
-            }
-            for end_package_node in end_package_nodes.iter() {
-                if node == *end_package_node {
-                    break;
-                }
-                if args.reverse_deps {
-                    if algo::has_path_connecting(&dep_graph, node, *end_package_node, None) {
-                        include = false;
-                        break;
-                    }
-                } else {
-                    if algo::has_path_connecting(&dep_graph, *end_package_node, node, None) {
-                        include = false;
-                        break;
-                    }
-                }
-            }
-            include
-        });
-
-        if args.remove_cycles {
-            let mut acyclic_deps = Graph::new();
-            let mut node_map = HashMap::new();
-            for (node_index, node) in build_graph.node_references() {
-                let mapped_node = acyclic_deps.add_node((*node).clone());
-                node_map.insert(node_index, mapped_node);
-            }
-            for edge in build_graph.edge_references() {
-                if let Some((from, to)) = dep_graph.edge_endpoints(edge.id()) {
-                    acyclic_deps.add_edge(
-                        *node_map.get(&from).unwrap(),
-                        *node_map.get(&to).unwrap(),
-                        (),
-                    );
-                };
-            }
-            acyclic_deps.reverse();
-            let fas: Vec<EdgeIndex> = greedy_feedback_arc_set(&acyclic_deps)
-                .map(|e| e.id())
-                .collect();
-
-            // Remove edges in feedback arc set from original graph
-            for edge_id in fas {
-                if let Some((from, to)) = acyclic_deps.edge_endpoints(edge_id) {
-                    info!(
-                        "Removing cyclic dependency {} -> {}",
-                        acyclic_deps[from].plan.ident, acyclic_deps[to].plan.ident
-                    );
-                }
-                acyclic_deps.remove_edge(edge_id);
-            }
-            acyclic_deps.reverse();
+        if selected_package_nodes.is_empty() {
             format!(
                 "{:?}",
-                Dot::with_config(&acyclic_deps, &[Config::EdgeNoLabel])
+                Dot::with_config(&*dep_graph, &[Config::EdgeNoLabel])
             )
         } else {
+            let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
+                let node = PackageNode(node);
+                let mut include = false;
+                for selected_package_node in selected_package_nodes.iter() {
+                    match args.analysis_type {
+                        DependencyAnalysis::Build | DependencyAnalysis::Runtime => {
+                            if node.is_dependency_of(&dep_graph, selected_package_node) {
+                                include = true;
+                                break;
+                            }
+                        }
+                        DependencyAnalysis::Reverse => {
+                            if selected_package_node.is_dependency_of(&dep_graph, &node) {
+                                include = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                include
+            });
             format!(
                 "{:?}",
                 Dot::with_config(&build_graph, &[Config::EdgeNoLabel])
@@ -1451,20 +1607,12 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
 
 async fn analyze(args: AnalyzeArgs) -> Result<()> {
     let scripts = Arc::new(Scripts::new().await?);
-    let start_package_idents = args
-        .start_packages
+    let selected_packages = args
+        .packages
         .into_iter()
         .map(PackageDepIdent::try_from)
         .collect::<Result<Vec<PackageDepIdent>, _>>()?;
 
-    let end_package_idents = if let Some(end_packages) = args.end_packages {
-        end_packages
-            .into_iter()
-            .map(PackageDepIdent::try_from)
-            .collect::<Result<Vec<PackageDepIdent>, _>>()?
-    } else {
-        Vec::new()
-    };
     let auto_build_config = HabitatAutoBuildConfiguration::new(
         args.config_path
             .unwrap_or(env::current_dir()?.join("hab-auto-build.json")),
@@ -1472,95 +1620,43 @@ async fn analyze(args: AnalyzeArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, start_package_nodes, _, end_package_nodes) = dep_graph_build(
-        start_package_idents,
-        end_package_idents,
-        auto_build_config,
-        false,
-        None,
-        scripts,
-    )
-    .await?;
+    let (dep_graph, selected_package_nodes, _, _) =
+        dep_graph_build(selected_packages, &auto_build_config, false, None, scripts).await?;
 
-    let packages = {
-        let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
-            let mut include = true;
-            for start_package_node in start_package_nodes.iter() {
-                if args.reverse_deps {
-                    if !algo::has_path_connecting(&dep_graph, node, *start_package_node, None) {
-                        include = false;
-                        break;
+    let packages = if selected_package_nodes.is_empty() {
+        let mut packages = Vec::new();
+        for (_, node) in dep_graph.node_references() {
+            packages.push(format!("{}", node.plan.ident))
+        }
+        packages
+    } else {
+        let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
+            let node = PackageNode(node);
+            let mut include = false;
+            for selected_package_node in selected_package_nodes.iter() {
+                match args.analysis_type {
+                    DependencyAnalysis::Build | DependencyAnalysis::Runtime => {
+                        if node.is_dependency_of(&dep_graph, selected_package_node) {
+                            include = true;
+                            break;
+                        }
                     }
-                } else {
-                    if !algo::has_path_connecting(&dep_graph, *start_package_node, node, None) {
-                        include = false;
-                        break;
-                    }
-                }
-            }
-            for end_package_node in end_package_nodes.iter() {
-                if node == *end_package_node {
-                    break;
-                }
-                if args.reverse_deps {
-                    if algo::has_path_connecting(&dep_graph, node, *end_package_node, None) {
-                        include = false;
-                        break;
-                    }
-                } else {
-                    if algo::has_path_connecting(&dep_graph, *end_package_node, node, None) {
-                        include = false;
-                        break;
+                    DependencyAnalysis::Reverse => {
+                        if selected_package_node.is_dependency_of(&dep_graph, &node) {
+                            include = true;
+                            break;
+                        }
                     }
                 }
             }
             include
         });
 
-        if args.remove_cycles {
-            let mut acyclic_deps = Graph::new();
-            let mut node_map = HashMap::new();
-            for (node_index, node) in build_graph.node_references() {
-                let mapped_node = acyclic_deps.add_node((*node).clone());
-                node_map.insert(node_index, mapped_node);
-            }
-            for edge in build_graph.edge_references() {
-                if let Some((from, to)) = dep_graph.edge_endpoints(edge.id()) {
-                    acyclic_deps.add_edge(
-                        *node_map.get(&from).unwrap(),
-                        *node_map.get(&to).unwrap(),
-                        (),
-                    );
-                };
-            }
-            acyclic_deps.reverse();
-            let fas: Vec<EdgeIndex> = greedy_feedback_arc_set(&acyclic_deps)
-                .map(|e| e.id())
-                .collect();
-
-            // Remove edges in feedback arc set from original graph
-            for edge_id in fas {
-                if let Some((from, to)) = acyclic_deps.edge_endpoints(edge_id) {
-                    info!(
-                        "Removing cyclic dependency {} -> {}",
-                        acyclic_deps[from].plan.ident, acyclic_deps[to].plan.ident
-                    );
-                }
-                acyclic_deps.remove_edge(edge_id);
-            }
-            acyclic_deps.reverse();
-            let mut packages = Vec::new();
-            for (_, node) in acyclic_deps.node_references() {
-                packages.push(format!("{}", node.plan.ident))
-            }
-            packages
-        } else {
-            let mut packages = Vec::new();
-            for (_, node) in build_graph.node_references() {
-                packages.push(format!("{}", node.plan.ident))
-            }
-            packages
+        let mut packages = Vec::new();
+        for (_, node) in build_graph.node_references() {
+            packages.push(format!("{}", node.plan.ident))
         }
+        packages
     };
 
     if let Some(output_file_path) = args.output {
@@ -1577,6 +1673,20 @@ async fn analyze(args: AnalyzeArgs) -> Result<()> {
     Ok(())
 }
 
+async fn serve(args: ServerArgs) -> Result<()> {
+    let scripts = Arc::new(Scripts::new().await?);
+    let auto_build_config = HabitatAutoBuildConfiguration::new(
+        args.config_path
+            .unwrap_or(env::current_dir()?.join("hab-auto-build.json")),
+    )
+    .await
+    .context("Failed to load habitat auto build configuration")?;
+    let (dep_graph, _, _, _) =
+        dep_graph_build(vec![], &auto_build_config, false, None, scripts).await?;
+    server::start(dep_graph, args.port).await;
+    Ok(())
+}
+
 async fn build(args: BuildArgs) -> Result<()> {
     let scripts = Arc::new(Scripts::new().await?);
     let manually_updated_package_idents = args
@@ -1585,38 +1695,42 @@ async fn build(args: BuildArgs) -> Result<()> {
         .map(PackageDepIdent::try_from)
         .collect::<Result<Vec<PackageDepIdent>, _>>()?;
 
-    let auto_build_config = HabitatAutoBuildConfiguration::new(
-        args.config_path
-            .unwrap_or(env::current_dir()?.join("hab-auto-build.json")),
-    )
-    .await
-    .context("Failed to load habitat auto build configuration")?;
+    let config_path = args
+        .config_path
+        .unwrap_or(env::current_dir()?.join("hab-auto-build.json"));
+    let package_skip_path = config_path
+        .parent()
+        .expect("Hab auto build configuration has no parent directory")
+        .join(".hab-build-ignore");
 
-    let package_skip_list = if let Some(path) = args.skipped_packages {
-        Some(PackageSkipList::new(path).await?)
-    } else {
-        None
-    };
+    let auto_build_config = HabitatAutoBuildConfiguration::new(config_path)
+        .await
+        .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, manually_updated_package_nodes, mut updated_package_nodes, _) =
+    let package_skip_list = PackageSkipList::new(package_skip_path).await.ok();
+
+    let (dep_graph, manually_updated_package_nodes, mut package_node_updates, studio_packages) =
         dep_graph_build(
             manually_updated_package_idents,
-            Vec::new(),
-            auto_build_config,
+            &auto_build_config,
             true,
             package_skip_list.as_ref(),
             scripts.clone(),
         )
         .await?;
 
-    for (updated_package_node, _) in updated_package_nodes.iter() {
+    for package_node_update in package_node_updates.iter() {
         info!(
-            "Detected changes in {} at {}",
-            dep_graph[*updated_package_node].plan.ident,
-            dep_graph[*updated_package_node].plan.source.display()
+            "Detected update due to {} in {} at {}",
+            package_node_update.cause,
+            dep_graph[*package_node_update.package].plan.ident,
+            dep_graph[*package_node_update.package]
+                .plan
+                .source
+                .display()
         );
     }
-    if !updated_package_nodes.is_empty() {
+    if !package_node_updates.is_empty() {
         let skip_packages = Confirm::new("Do you want to skip the build of certain updated packages?")
         .with_default(false)
         .with_help_message("This is useful to avoid rebuilding packages that have only trivial formatting, styling changes")
@@ -1626,11 +1740,9 @@ async fn build(args: BuildArgs) -> Result<()> {
                 .map_or(Vec::new(), |skip_list| skip_list.packages)
                 .into_iter()
                 .filter(|skipped_package| {
-                    !updated_package_nodes
-                        .iter()
-                        .any(|(updated_package_node_index, _)| {
-                            &dep_graph[*updated_package_node_index].plan.ident == skipped_package
-                        })
+                    !package_node_updates.iter().any(|package_node_update| {
+                        &dep_graph[*package_node_update.package].plan.ident == skipped_package
+                    })
                 })
                 .collect::<Vec<_>>();
             let default_skipped_packages = skipped_packages
@@ -1639,11 +1751,14 @@ async fn build(args: BuildArgs) -> Result<()> {
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
 
-            for (updated_package_node, update_cause) in updated_package_nodes.iter() {
-                if !matches!(update_cause, UpdateCause::UpdatedDependency) {
-                    let build_ident = dep_graph[*updated_package_node].plan.ident.clone();
+            for package_node_update in package_node_updates.iter() {
+                if !matches!(package_node_update.cause, UpdateCause::UpdatedDependency) {
+                    let build_ident = dep_graph[*package_node_update.package].plan.ident.clone();
                     if !skipped_packages.contains(&build_ident) {
-                        debug!("Adding {:?} to {:?} due to {:?}", build_ident, skip_packages, update_cause);
+                        debug!(
+                            "Adding {:?} to {:?} due to {:?}",
+                            build_ident, skip_packages, package_node_update.cause
+                        );
                         skipped_packages.push(build_ident);
                     }
                 }
@@ -1653,50 +1768,62 @@ async fn build(args: BuildArgs) -> Result<()> {
                     .with_default(&default_skipped_packages)
                     .prompt()?;
 
-            updated_package_nodes.retain(|(package_index, _)| {
-                !skipped_packages.contains(&dep_graph[*package_index].plan.ident)
+            package_node_updates.retain(|package_node_update| {
+                !skipped_packages.contains(&dep_graph[*package_node_update.package].plan.ident)
             });
-
-            let save_skip_list =
-                Confirm::new("Do you want to save the list of packages to be skipped?")
-                    .with_default(false)
-                    .with_help_message("This is useful to when you rebuild multiple times")
-                    .prompt()?;
-            if save_skip_list {
-                tokio::fs::write(
-                    "package_skip_list",
-                    serde_json::to_string_pretty(&PackageSkipList {
-                        updated_at: Utc::now(),
-                        packages: skipped_packages,
-                    })?,
-                )
-                .await?;
-            }
+            tokio::fs::write(
+                ".hab-build-ignore",
+                serde_json::to_string_pretty(&PackageSkipList {
+                    updated_at: Utc::now(),
+                    packages: skipped_packages,
+                })?,
+            )
+            .await?;
         }
     }
 
-    let build_graph = NodeFiltered::from_fn(&dep_graph, |node| {
+    let feedback_edges: Vec<EdgeIndex> = greedy_feedback_arc_set(&*dep_graph)
+        .map(|e| e.id())
+        .collect();
+    for feedback_edge in feedback_edges.iter() {
+        if let Some((start, end)) = dep_graph.edge_endpoints(*feedback_edge) {
+            warn!(
+                "Package {:?} depends on {:?} which creates a cycle",
+                dep_graph[start], dep_graph[end]
+            );
+        }
+    }
+    if !feedback_edges.is_empty() {
+        return Err(anyhow!("Building cyclic dependencies it not allowed, please break cycles and attempt to build again."));
+    }
+
+    let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
+        let node = PackageNode(node);
         let mut is_affected = false;
-        for (updated_package_node, _) in updated_package_nodes.iter() {
+        for package_node_update in package_node_updates.iter() {
+            if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package) {
+                is_affected = true;
+            }
+            // filter out updates that are not reverse dependencies of our selected packages
             if !manually_updated_package_nodes.is_empty() {
                 let mut should_include = false;
                 for manually_updated_package_node in manually_updated_package_nodes.iter() {
-                    if algo::has_path_connecting(
-                        &dep_graph,
-                        *updated_package_node,
-                        *manually_updated_package_node,
-                        None,
-                    ) {
+                    if package_node_update
+                        .package
+                        .is_reverse_dependency_of(&dep_graph, manually_updated_package_node)
+                    {
                         should_include = true;
                         break;
                     }
                 }
                 if !should_include {
+                    if is_affected {
+                        warn!("Skipping package {} that depends on package {} that was updated due to {}", dep_graph[*node].plan.ident, dep_graph[*package_node_update.package].plan.ident, package_node_update.cause);
+                    }
                     continue;
                 }
             }
-            if algo::has_path_connecting(&dep_graph, node, *updated_package_node, None) {
-                is_affected = true;
+            if is_affected {
                 break;
             }
         }
@@ -1705,6 +1832,7 @@ async fn build(args: BuildArgs) -> Result<()> {
 
     let mut build_order =
         algo::toposort(&build_graph, None).map_err(|err| anyhow!("Cycle detected: {:?}", err))?;
+
     build_order.reverse();
     let build_order = Arc::new(build_order);
 
@@ -1723,6 +1851,7 @@ async fn build(args: BuildArgs) -> Result<()> {
         }),
         build_order.clone(),
         Arc::new(dep_graph),
+        auto_build_config.bootstrap_studio_package,
         scripts,
     );
 
@@ -1752,6 +1881,7 @@ async fn main() -> Result<()> {
         Commands::Build(args) => build(args).await,
         Commands::Visualize(args) => visualize(args).await,
         Commands::Analyze(args) => analyze(args).await,
+        Commands::Server(args) => serve(args).await,
     }
 }
 
@@ -1760,8 +1890,9 @@ struct Scheduler {
     scripts: Arc<Scripts>,
     built_packages: Arc<DashSet<NodeIndex>>,
     pending_packages: Arc<DashSet<NodeIndex>>,
+    bootstrap_studio_package: Option<PackageDepIdent>,
     build_order: Arc<Vec<NodeIndex>>,
-    dep_graph: Arc<Graph<PackageBuild, ()>>,
+    dep_graph: Arc<PackageDependencyGraph>,
     handles: FuturesUnordered<JoinHandle<Result<(), anyhow::Error>>>,
 }
 
@@ -1782,6 +1913,7 @@ impl<'a> PackageBuilder<'a> {
     async fn build(
         self,
         deps_in_current_build: Vec<&PackageBuild>,
+        bootstrap_studio_package: Option<PackageDepIdent>,
         scripts: Arc<Scripts>,
     ) -> Result<()> {
         let PackageBuilder {
@@ -1806,13 +1938,6 @@ impl<'a> PackageBuilder<'a> {
                 )
             })?;
 
-        // if let Ok(true) = tokio::fs::metadata(build.build_success_file(&session_id).as_path())
-        //     .await
-        //     .map(|metadata| metadata.is_file() )
-        // {
-        //     info!("Package {:?} already built", build.plan);
-        //     return Ok(());
-        // }
         let mut build_log_file = File::create(build.build_log_file(&session_id))
             .await
             .context(format!(
@@ -1822,8 +1947,8 @@ impl<'a> PackageBuilder<'a> {
         let repo = build.plan.repo.as_path();
         let source = build.plan.source.strip_prefix(repo)?;
 
-        let mut child = match build.package_type {
-            PackageType::Native => {
+        let mut child = match build.studio_type {
+            Some(PackageStudioType::Native) => {
                 info!(
                     "Building native package {} in {}, view log at {}",
                     source.display(),
@@ -1844,7 +1969,7 @@ impl<'a> PackageBuilder<'a> {
                     .spawn()
                     .expect("Failed to invoke hab build command")
             }
-            PackageType::Bootstrap => {
+            Some(PackageStudioType::Bootstrap) => {
                 let mut pkg_deps = Vec::new();
                 for dep in build.plan.deps.iter().chain(build.plan.build_deps.iter()) {
                     let mut resolved_dep = None;
@@ -1896,23 +2021,16 @@ impl<'a> PackageBuilder<'a> {
                     .arg("hab")
                     .arg("pkg")
                     .arg("exec")
-                    .arg(
-                        build
-                            .repo
-                            .config
-                            .bootstrap_studio_package
-                            .as_ref()
-                            .unwrap_or(&HAB_DEFAULT_BOOTSTRAP_STUDIO_PACKAGE)
-                            .to_string(),
-                    )
+                    .arg(bootstrap_studio_package.unwrap().to_string())
                     .arg("hab-studio")
                     .arg("-t")
                     .arg("bootstrap")
                     .arg("-r")
-                    .arg(PathBuf::from("/hab").join("studios").join(format!(
-                        "hab-auto-build-{}",
-                        session_id,
-                    )))
+                    .arg(
+                        PathBuf::from("/hab")
+                            .join("studios")
+                            .join(format!("hab-auto-build-{}", session_id,)),
+                    )
                     .arg("build")
                     .arg(source)
                     .env("HAB_ORIGIN", build.plan.ident.origin.as_str())
@@ -1930,7 +2048,7 @@ impl<'a> PackageBuilder<'a> {
                     .spawn()
                     .expect("Failed to invoke hab build command")
             }
-            PackageType::Standard => {
+            Some(PackageStudioType::Standard) => {
                 info!(
                     "Building package {} in {} with standard studio, view log at {}",
                     source.display(),
@@ -1951,6 +2069,9 @@ impl<'a> PackageBuilder<'a> {
                     .stderr(Stdio::piped())
                     .spawn()
                     .expect("Failed to invoke hab build command")
+            }
+            None => {
+                return Err(anyhow!("Unable to build package {}", source.display()));
             }
         };
 
@@ -2026,7 +2147,8 @@ impl Scheduler {
     pub fn new(
         session_id: String,
         build_order: Arc<Vec<NodeIndex>>,
-        dep_graph: Arc<Graph<PackageBuild, ()>>,
+        dep_graph: Arc<PackageDependencyGraph>,
+        bootstrap_studio_package: Option<PackageDepIdent>,
         scripts: Arc<Scripts>,
     ) -> Scheduler {
         Scheduler {
@@ -2034,6 +2156,7 @@ impl Scheduler {
             scripts,
             built_packages: Arc::new(DashSet::new()),
             pending_packages: Arc::new(DashSet::new()),
+            bootstrap_studio_package,
             build_order,
             dep_graph,
             handles: FuturesUnordered::new(),
@@ -2046,7 +2169,7 @@ impl Scheduler {
         built_packages: Arc<DashSet<NodeIndex>>,
         pending_packages: Arc<DashSet<NodeIndex>>,
         build_order: Arc<Vec<NodeIndex>>,
-        dep_graph: Arc<Graph<PackageBuild, ()>>,
+        dep_graph: Arc<PackageDependencyGraph>,
     ) -> NextPackageBuild {
         for package in build_order.iter() {
             if built_packages.contains(package) {
@@ -2076,40 +2199,49 @@ impl Scheduler {
     }
 
     pub fn thread_start(&self) {
-        let built_packages = self.built_packages.clone();
-        let scripts = self.scripts.clone();
-        let pending_packages = self.pending_packages.clone();
-        let build_order = self.build_order.clone();
-        let dep_graph = self.dep_graph.clone();
-        let worker_index = self.handles.len() + 1;
-        let session_id = self.session_id.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                match Scheduler::next(
-                    built_packages.clone(),
-                    pending_packages.clone(),
-                    build_order.clone(),
-                    dep_graph.clone(),
-                ) {
-                    NextPackageBuild::Ready(package_index) => {
-                        let build = &dep_graph[package_index];
-                        let builder = PackageBuilder::new(&session_id, worker_index, build);
-                        let build_deps = dep_graph
-                            .neighbors_directed(package_index, Direction::Outgoing)
-                            .into_iter()
-                            .map(|dep_index| &dep_graph[dep_index])
-                            .collect::<Vec<_>>();
-                        builder.build(build_deps, scripts.clone()).await?;
-                        Scheduler::mark_complete(built_packages.clone(), package_index);
+        let handle = tokio::spawn({
+            let built_packages = self.built_packages.clone();
+            let scripts = self.scripts.clone();
+            let pending_packages = self.pending_packages.clone();
+            let build_order = self.build_order.clone();
+            let dep_graph = self.dep_graph.clone();
+            let worker_index = self.handles.len() + 1;
+            let session_id = self.session_id.clone();
+            let bootstrap_studio_package = self.bootstrap_studio_package.clone();
+            async move {
+                loop {
+                    match Scheduler::next(
+                        built_packages.clone(),
+                        pending_packages.clone(),
+                        build_order.clone(),
+                        dep_graph.clone(),
+                    ) {
+                        NextPackageBuild::Ready(package_index) => {
+                            let build = &dep_graph[package_index];
+                            let builder = PackageBuilder::new(&session_id, worker_index, build);
+                            let build_deps = dep_graph
+                                .neighbors_directed(package_index, Direction::Outgoing)
+                                .into_iter()
+                                .map(|dep_index| &dep_graph[dep_index])
+                                .collect::<Vec<_>>();
+                            builder
+                                .build(
+                                    build_deps,
+                                    bootstrap_studio_package.clone(),
+                                    scripts.clone(),
+                                )
+                                .await?;
+                            Scheduler::mark_complete(built_packages.clone(), package_index);
+                        }
+                        NextPackageBuild::Waiting => {
+                            debug!(worker = worker_index, "Waiting for build");
+                            tokio::time::sleep(Duration::from_secs(1)).await
+                        }
+                        NextPackageBuild::Done => break,
                     }
-                    NextPackageBuild::Waiting => {
-                        debug!(worker = worker_index, "Waiting for build");
-                        tokio::time::sleep(Duration::from_secs(1)).await
-                    }
-                    NextPackageBuild::Done => break,
                 }
+                Ok(())
             }
-            Ok(())
         });
         self.handles.push(handle);
     }
