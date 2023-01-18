@@ -31,6 +31,7 @@ use tempdir::TempDir;
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    sync::RwLock,
     task::JoinHandle,
 };
 use tracing::{debug, error, info, trace, warn};
@@ -66,6 +67,70 @@ lazy_static::lazy_static! {
         version: None,
         release: None,
     };
+    static ref SYSTEM_HABITAT: Arc<RwLock<SystemHabitat>> = Arc::new(RwLock::new(SystemHabitat::new("/hab")));
+    static ref BOOTSTRAP_STUDIO_INSTALLED: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
+    static ref STUDIO_INSTALLED: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
+}
+
+pub struct SystemHabitat {
+    root: PathBuf,
+}
+impl SystemHabitat {
+    pub fn new(root: impl AsRef<Path>) -> SystemHabitat {
+        SystemHabitat {
+            root: root.as_ref().into(),
+        }
+    }
+    pub async fn is_pkg_installed(&self, ident: &PackageDepIdent) -> Result<bool> {
+        let exit_status = tokio::process::Command::new("sudo")
+            .arg("-E")
+            .arg("hab")
+            .arg("pkg")
+            .arg("path")
+            .arg(ident.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to invoke hab build command")
+            .wait()
+            .await?;
+        if exit_status.success() {
+            Ok(true)
+        } else if let Some(1) = exit_status.code() {
+            Ok(false)
+        } else {
+            Err(anyhow!(
+                "Failed to check package installation, exit code: {:?}",
+                exit_status.code()
+            ))
+        }
+    }
+    pub async fn pkg_install(&mut self, ident: &PackageDepIdent) -> Result<()> {
+        let exit_status = tokio::process::Command::new("sudo")
+            .arg("-E")
+            .arg("hab")
+            .arg("pkg")
+            .arg("install")
+            .arg(ident.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to invoke hab build command")
+            .wait()
+            .await?;
+        if exit_status.success() {
+            Ok(())
+        } else if let Some(1) = exit_status.code() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Failed to install package, exit code: {:?}",
+                exit_status.code()
+            ))
+        }
+    }
 }
 
 type ArtifactCacheIndex =
@@ -1033,6 +1098,16 @@ impl From<&PackageBuildIdent> for PackageDepIdent {
         }
     }
 }
+impl From<&PackageArtifactIdent> for PackageDepIdent {
+    fn from(ident: &PackageArtifactIdent) -> Self {
+        PackageDepIdent {
+            origin: ident.origin.clone(),
+            name: ident.name.clone(),
+            version: Some(ident.version.clone()),
+            release: Some(ident.release.clone()),
+        }
+    }
+}
 
 pub struct PlanSource {
     pub path: PathBuf,
@@ -1852,6 +1927,7 @@ async fn build(args: BuildArgs) -> Result<()> {
         build_order.clone(),
         Arc::new(dep_graph),
         auto_build_config.bootstrap_studio_package,
+        auto_build_config.studio_package,
         scripts,
     );
 
@@ -1891,7 +1967,9 @@ struct Scheduler {
     built_packages: Arc<DashSet<NodeIndex>>,
     pending_packages: Arc<DashSet<NodeIndex>>,
     bootstrap_studio_package: Option<PackageDepIdent>,
+    studio_package: Option<PackageDepIdent>,
     build_order: Arc<Vec<NodeIndex>>,
+    origin_keys: BTreeSet<String>,
     dep_graph: Arc<PackageDependencyGraph>,
     handles: FuturesUnordered<JoinHandle<Result<(), anyhow::Error>>>,
 }
@@ -1913,7 +1991,9 @@ impl<'a> PackageBuilder<'a> {
     async fn build(
         self,
         deps_in_current_build: Vec<&PackageBuild>,
+        origin_keys: BTreeSet<String>,
         bootstrap_studio_package: Option<PackageDepIdent>,
+        studio_package: Option<PackageDepIdent>,
         scripts: Arc<Scripts>,
     ) -> Result<()> {
         let PackageBuilder {
@@ -1947,6 +2027,45 @@ impl<'a> PackageBuilder<'a> {
         let repo = build.plan.repo.as_path();
         let source = build.plan.source.strip_prefix(repo)?;
 
+        let mut pkg_deps = Vec::new();
+        for dep in build.plan.deps.iter().chain(build.plan.build_deps.iter()) {
+            let mut resolved_dep = None;
+            for dep_in_current_build in deps_in_current_build.iter() {
+                if !dep.matches_build(&dep_in_current_build.plan.ident) {
+                    continue;
+                }
+                if let Ok(artifact) = dep_in_current_build.last_build_artifact(&session_id).await {
+                    resolved_dep = Some(
+                        PathBuf::from("/hab")
+                            .join("cache")
+                            .join("artifacts")
+                            .join(artifact.to_string()),
+                    );
+                    break;
+                }
+            }
+            if resolved_dep.is_none() {
+                if let Ok(Some(artifact)) =
+                    dep.latest_artifact(build.plan.ident.target, &scripts).await
+                {
+                    resolved_dep = Some(
+                        PathBuf::from("/hab")
+                            .join("cache")
+                            .join("artifacts")
+                            .join(artifact.to_string()),
+                    );
+                } else {
+                    warn!(
+                        "Failed to find local build artifact for {}, required by {}",
+                        dep, build.plan.ident
+                    );
+                }
+            }
+            if let Some(resolved_dep) = resolved_dep {
+                pkg_deps.push(format!("{}", resolved_dep.display()))
+            }
+        }
+
         let mut child = match build.studio_type {
             Some(PackageStudioType::Native) => {
                 info!(
@@ -1970,44 +2089,37 @@ impl<'a> PackageBuilder<'a> {
                     .expect("Failed to invoke hab build command")
             }
             Some(PackageStudioType::Bootstrap) => {
-                let mut pkg_deps = Vec::new();
-                for dep in build.plan.deps.iter().chain(build.plan.build_deps.iter()) {
-                    let mut resolved_dep = None;
-                    for dep_in_current_build in deps_in_current_build.iter() {
-                        if !dep.matches_build(&dep_in_current_build.plan.ident) {
-                            continue;
-                        }
-                        if let Ok(artifact) =
-                            dep_in_current_build.last_build_artifact(&session_id).await
-                        {
-                            resolved_dep = Some(
-                                PathBuf::from("/hab")
-                                    .join("cache")
-                                    .join("artifacts")
-                                    .join(artifact.to_string()),
+                // Ensure the bootstrap studio is installed
+                {
+                    let is_bootstrap_studio_installed = BOOTSTRAP_STUDIO_INSTALLED.read().await;
+                    if !*is_bootstrap_studio_installed {
+                        drop(is_bootstrap_studio_installed);
+                        let mut is_bootstrap_studio_installed =
+                            BOOTSTRAP_STUDIO_INSTALLED.write().await;
+                        if !*is_bootstrap_studio_installed {
+                            let mut sys_hab = SYSTEM_HABITAT.write().await;
+                            let bootstrap_studio_package =
+                                bootstrap_studio_package.as_ref().ok_or(anyhow!(
+                                    "Bootstrap studio package has not been specified"
+                                ))?;
+                            info!(
+                                "Installing bootstrap studio package: {}",
+                                bootstrap_studio_package
                             );
-                            break;
+                            let studio_ident = bootstrap_studio_package
+                                .latest_artifact(PackageTarget::default(), &scripts)
+                                .await
+                                .context("Failed to determine latest artifact for bootstrap studio package")?
+                                .map( |artifact_ident| {
+                                    PackageDepIdent::from(&artifact_ident)
+                                });
+                            sys_hab
+                                .pkg_install(
+                                    studio_ident.as_ref().unwrap_or(bootstrap_studio_package),
+                                )
+                                .await?;
+                            *is_bootstrap_studio_installed = true;
                         }
-                    }
-                    if resolved_dep.is_none() {
-                        if let Ok(Some(artifact)) =
-                            dep.latest_artifact(build.plan.ident.target, &scripts).await
-                        {
-                            resolved_dep = Some(
-                                PathBuf::from("/hab")
-                                    .join("cache")
-                                    .join("artifacts")
-                                    .join(artifact.to_string()),
-                            );
-                        } else {
-                            warn!(
-                                "Failed to find local build artifact for {}, required by {}",
-                                dep, build.plan.ident
-                            );
-                        }
-                    }
-                    if let Some(resolved_dep) = resolved_dep {
-                        pkg_deps.push(format!("{}", resolved_dep.display()))
                     }
                 }
                 info!(
@@ -2021,7 +2133,7 @@ impl<'a> PackageBuilder<'a> {
                     .arg("hab")
                     .arg("pkg")
                     .arg("exec")
-                    .arg(bootstrap_studio_package.unwrap().to_string())
+                    .arg(bootstrap_studio_package.as_ref().unwrap().to_string())
                     .arg("hab-studio")
                     .arg("-t")
                     .arg("bootstrap")
@@ -2033,9 +2145,12 @@ impl<'a> PackageBuilder<'a> {
                     )
                     .arg("build")
                     .arg(source)
-                    .env("HAB_ORIGIN", build.plan.ident.origin.as_str())
+                    .env(
+                        "HAB_ORIGIN_KEYS",
+                        origin_keys.into_iter().collect::<Vec<_>>().join(","),
+                    )
                     .env("HAB_LICENSE", "accept-no-persist")
-                    .env("HAB_PKG_DEPS", pkg_deps.join(":"))
+                    .env("HAB_STUDIO_INSTALL_PKGS", pkg_deps.join(":"))
                     .env("HAB_STUDIO_SECRET_STUDIO_ENTER", "1")
                     .env(
                         "HAB_STUDIO_SECRET_HAB_OUTPUT_PATH",
@@ -2049,16 +2164,54 @@ impl<'a> PackageBuilder<'a> {
                     .expect("Failed to invoke hab build command")
             }
             Some(PackageStudioType::Standard) => {
+                // Ensure the studio is installed
+                {
+                    let is_studio_installed = STUDIO_INSTALLED.read().await;
+                    if !*is_studio_installed {
+                        drop(is_studio_installed);
+                        let mut is_studio_installed = STUDIO_INSTALLED.write().await;
+                        if !*is_studio_installed {
+                            let mut sys_hab = SYSTEM_HABITAT.write().await;
+                            let studio_package = studio_package
+                                .as_ref()
+                                .ok_or(anyhow!("Studio package has not been specified"))?;
+                            info!("Installing studio package: {}", studio_package);
+                            let studio_ident = studio_package
+                                .latest_artifact(PackageTarget::default(), &scripts)
+                                .await
+                                .context("Failed to determine latest artifact for studio package")?
+                                .map(|artifact_ident| PackageDepIdent::from(&artifact_ident));
+                            sys_hab
+                                .pkg_install(studio_ident.as_ref().unwrap_or(studio_package))
+                                .await?;
+                            *is_studio_installed = true;
+                        }
+                    }
+                }
                 info!(
                     "Building package {} in {} with standard studio, view log at {}",
                     source.display(),
                     repo.display(),
                     build.build_log_file(&session_id).display()
                 );
-                tokio::process::Command::new("hab")
+                tokio::process::Command::new("sudo")
+                    .arg("-E")
+                    .arg("hab")
                     .arg("pkg")
                     .arg("build")
+                    .arg("-r")
+                    .arg(
+                        PathBuf::from("/hab")
+                            .join("studios")
+                            .join(format!("hab-auto-build-{}", session_id)),
+                    )
                     .arg(source)
+                    .env("HAB_LICENSE", "accept-no-persist")
+                    .env("HAB_STUDIO_INSTALL_PKGS", pkg_deps.join(":"))
+                    .env(
+                        "HAB_ORIGIN_KEYS",
+                        origin_keys.into_iter().collect::<Vec<_>>().join(","),
+                    )
                     .env(
                         "HAB_STUDIO_SECRET_OUTPUT_PATH",
                         build.package_studio_build_folder(&session_id),
@@ -2123,6 +2276,20 @@ impl<'a> PackageBuilder<'a> {
                                     worker = worker_index,
                                     "Built {:?}", build.plan
                                 );
+                                // If we just built a studio package mark it as not installed
+                                // so that we ensure the latest built studio is installed and used
+                                if let Some(studio_package) = &studio_package {
+                                    if studio_package.matches_build(&build.plan.ident) {
+                                        let mut is_studio_installed = STUDIO_INSTALLED.write().await;
+                                        *is_studio_installed = false;
+                                    }
+                                }
+                                if let Some(bootstrap_studio_package) = &bootstrap_studio_package {
+                                    if bootstrap_studio_package.matches_build(&build.plan.ident) {
+                                        let mut is_bootstrap_studio_installed = BOOTSTRAP_STUDIO_INSTALLED.write().await;
+                                        *is_bootstrap_studio_installed = false;
+                                    }
+                                }
                                 return Ok(())
                             } else {
                                 error!(worker = worker_index, "Failed to build {:?}, build process exited with {}, please the build log for errors: {}", build.plan, exit_code, build.build_log_file(&session_id).display());
@@ -2149,15 +2316,24 @@ impl Scheduler {
         build_order: Arc<Vec<NodeIndex>>,
         dep_graph: Arc<PackageDependencyGraph>,
         bootstrap_studio_package: Option<PackageDepIdent>,
+        studio_package: Option<PackageDepIdent>,
         scripts: Arc<Scripts>,
     ) -> Scheduler {
+        let mut origin_keys = BTreeSet::new();
+        for package_index in build_order.iter() {
+            let package = &dep_graph[*package_index];
+            origin_keys.insert(package.plan.ident.origin.to_owned());
+            // TODO: Should we also import origin keys for the deps / build_deps?
+        }
         Scheduler {
             session_id,
             scripts,
             built_packages: Arc::new(DashSet::new()),
             pending_packages: Arc::new(DashSet::new()),
             bootstrap_studio_package,
+            studio_package,
             build_order,
+            origin_keys,
             dep_graph,
             handles: FuturesUnordered::new(),
         }
@@ -2208,6 +2384,8 @@ impl Scheduler {
             let worker_index = self.handles.len() + 1;
             let session_id = self.session_id.clone();
             let bootstrap_studio_package = self.bootstrap_studio_package.clone();
+            let studio_package = self.studio_package.clone();
+            let origin_keys = self.origin_keys.clone();
             async move {
                 loop {
                     match Scheduler::next(
@@ -2227,7 +2405,9 @@ impl Scheduler {
                             builder
                                 .build(
                                     build_deps,
+                                    origin_keys.clone(),
                                     bootstrap_studio_package.clone(),
+                                    studio_package.clone(),
                                     scripts.clone(),
                                 )
                                 .await?;
