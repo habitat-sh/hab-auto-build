@@ -310,12 +310,15 @@ struct BuildArgs {
     /// Path to hab auto build configuration
     #[arg(short, long)]
     config_path: Option<PathBuf>,
+    /// Don't display interactive prompts
+    #[arg(short = 'n', long)]
+    no_prompts: bool,
     /// Unique ID to identify the build
     #[arg(short = 'i', long)]
     session_id: Option<String>,
     /// Forces studio package updates to rebuild all packages that need a studio
     #[arg(short = 's', long)]
-    strict_build_order: Option<bool>,
+    strict_build_order: bool,
     /// Maximum number of parallel build workers
     #[arg(short, long)]
     workers: Option<usize>,
@@ -1815,7 +1818,7 @@ async fn build(args: BuildArgs) -> Result<()> {
             manually_updated_package_idents,
             &auto_build_config,
             true,
-            args.strict_build_order.unwrap_or_default(),
+            args.strict_build_order,
             package_skip_list.as_ref(),
             scripts.clone(),
         )
@@ -1832,7 +1835,7 @@ async fn build(args: BuildArgs) -> Result<()> {
                 .display()
         );
     }
-    if !package_node_updates.is_empty() {
+    if !package_node_updates.is_empty() && !args.no_prompts {
         let skip_packages = Confirm::new("Do you want to skip the build of certain updated packages?")
         .with_default(false)
         .with_help_message("This is useful to avoid rebuilding packages that have only trivial formatting, styling changes")
@@ -1899,7 +1902,7 @@ async fn build(args: BuildArgs) -> Result<()> {
         return Err(anyhow!("Building cyclic dependencies it not allowed, please break cycles and attempt to build again."));
     }
 
-    let build_order = if args.strict_build_order.unwrap_or_default() {
+    let build_order = if args.strict_build_order {
         let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
             let node = PackageNode(node);
             let mut is_affected = false;
@@ -1956,8 +1959,11 @@ async fn build(args: BuildArgs) -> Result<()> {
                 let node = PackageNode(node);
                 let mut is_affected = false;
                 for package_node_update in package_node_updates.iter() {
+                    // Include a node if:
+                    // - the node is a reverse dependency of an updated package
+                    // - the node is the dependency of the bootstrap studio package
                     if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package)
-                        && bootstrap_studio_package_node.is_reverse_dependency_of(&dep_graph, &node)
+                        && node.is_dependency_of(&dep_graph, &bootstrap_studio_package_node)
                     {
                         is_affected = true;
                         break;
@@ -1979,8 +1985,18 @@ async fn build(args: BuildArgs) -> Result<()> {
                 let node = PackageNode(node);
                 let mut is_affected = false;
                 for package_node_update in package_node_updates.iter() {
+                    // Include a node if:
+                    // - the node is a reverse dependency of an updated package
+                    // - the node is not the dependency of the bootstrap studio package, if any
+                    // - the node is the dependency of the studio package
                     if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package)
-                        && studio_package_node.is_reverse_dependency_of(&dep_graph, &node)
+                        && !studio_packages
+                            .bootstrap_studio
+                            .map(|bootstrap_studio_package| {
+                                node.is_dependency_of(&dep_graph, &bootstrap_studio_package)
+                            })
+                            .unwrap_or_default()
+                        && node.is_dependency_of(&dep_graph, &studio_package_node)
                     {
                         is_affected = true;
                         break;
@@ -2003,8 +2019,8 @@ async fn build(args: BuildArgs) -> Result<()> {
                 for package_node_update in package_node_updates.iter() {
                     // Include a node if:
                     // - the node is a reverse dependency of an updated package
-                    // - the node is not the dependency of a bootstrap studio package if any
-                    // - the node is not the dependency of a studio package if any
+                    // - the node is not the dependency of the bootstrap studio package if any
+                    // - the node is not the dependency of the studio package if any
                     if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package)
                         && !studio_packages
                             .bootstrap_studio
