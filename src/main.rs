@@ -313,6 +313,9 @@ struct BuildArgs {
     /// Unique ID to identify the build
     #[arg(short = 'i', long)]
     session_id: Option<String>,
+    /// Forces studio package updates to rebuild all packages that need a studio
+    #[arg(short = 's', long)]
+    strict_build_order: Option<bool>,
     /// Maximum number of parallel build workers
     #[arg(short, long)]
     workers: Option<usize>,
@@ -1424,6 +1427,7 @@ async fn dep_graph_build(
     start_package_idents: Vec<PackageDepIdent>,
     auto_build_config: &HabitatAutoBuildConfiguration,
     detect_updates: bool,
+    add_studio_dependency: bool,
     skip_list: Option<&PackageSkipList>,
     scripts: Arc<Scripts>,
 ) -> Result<(
@@ -1571,10 +1575,12 @@ async fn dep_graph_build(
                                         None
                                     }
                                     false => {
-                                        dep_graph.add_studio_dependency(
-                                            *node,
-                                            *bootstrap_studio_package,
-                                        );
+                                        if add_studio_dependency {
+                                            dep_graph.add_studio_dependency(
+                                                *node,
+                                                *bootstrap_studio_package,
+                                            );
+                                        }
                                         Some(PackageStudioType::Bootstrap)
                                     }
                                 }
@@ -1585,7 +1591,9 @@ async fn dep_graph_build(
                             }
                         },
                         false => {
-                            dep_graph.add_studio_dependency(*node, *studio_package);
+                            if add_studio_dependency {
+                                dep_graph.add_studio_dependency(*node, *studio_package);
+                            }
                             Some(PackageStudioType::Standard)
                         }
                     },
@@ -1597,8 +1605,12 @@ async fn dep_graph_build(
                                     None
                                 }
                                 false => {
-                                    dep_graph
-                                        .add_studio_dependency(*node, *bootstrap_studio_package);
+                                    if add_studio_dependency {
+                                        dep_graph.add_studio_dependency(
+                                            *node,
+                                            *bootstrap_studio_package,
+                                        );
+                                    }
                                     Some(PackageStudioType::Bootstrap)
                                 }
                             }
@@ -1635,8 +1647,15 @@ async fn visualize(args: VisualizeArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, selected_package_nodes, _, _) =
-        dep_graph_build(selected_packages, &auto_build_config, false, None, scripts).await?;
+    let (dep_graph, selected_package_nodes, _, _) = dep_graph_build(
+        selected_packages,
+        &auto_build_config,
+        false,
+        true,
+        None,
+        scripts,
+    )
+    .await?;
 
     let output = {
         if selected_package_nodes.is_empty() {
@@ -1695,8 +1714,15 @@ async fn analyze(args: AnalyzeArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
 
-    let (dep_graph, selected_package_nodes, _, _) =
-        dep_graph_build(selected_packages, &auto_build_config, false, None, scripts).await?;
+    let (dep_graph, selected_package_nodes, _, _) = dep_graph_build(
+        selected_packages,
+        &auto_build_config,
+        false,
+        true,
+        None,
+        scripts,
+    )
+    .await?;
 
     let packages = if selected_package_nodes.is_empty() {
         let mut packages = Vec::new();
@@ -1757,7 +1783,7 @@ async fn serve(args: ServerArgs) -> Result<()> {
     .await
     .context("Failed to load habitat auto build configuration")?;
     let (dep_graph, _, _, _) =
-        dep_graph_build(vec![], &auto_build_config, false, None, scripts).await?;
+        dep_graph_build(vec![], &auto_build_config, false, true, None, scripts).await?;
     server::start(dep_graph, args.port).await;
     Ok(())
 }
@@ -1789,6 +1815,7 @@ async fn build(args: BuildArgs) -> Result<()> {
             manually_updated_package_idents,
             &auto_build_config,
             true,
+            args.strict_build_order.unwrap_or_default(),
             package_skip_list.as_ref(),
             scripts.clone(),
         )
@@ -1872,53 +1899,192 @@ async fn build(args: BuildArgs) -> Result<()> {
         return Err(anyhow!("Building cyclic dependencies it not allowed, please break cycles and attempt to build again."));
     }
 
-    let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
-        let node = PackageNode(node);
-        let mut is_affected = false;
-        for package_node_update in package_node_updates.iter() {
-            if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package) {
-                is_affected = true;
+    let build_order = if args.strict_build_order.unwrap_or_default() {
+        let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
+            let node = PackageNode(node);
+            let mut is_affected = false;
+            for package_node_update in package_node_updates.iter() {
+                if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package) {
+                    is_affected = true;
+                }
+                // filter out updates that are not reverse dependencies of our selected packages
+                if !manually_updated_package_nodes.is_empty() {
+                    let mut should_include = false;
+                    for manually_updated_package_node in manually_updated_package_nodes.iter() {
+                        if package_node_update
+                            .package
+                            .is_reverse_dependency_of(&dep_graph, manually_updated_package_node)
+                        {
+                            should_include = true;
+                            break;
+                        }
+                    }
+                    if !should_include {
+                        if is_affected {
+                            warn!("Skipping package {} that depends on package {} that was updated due to {}", dep_graph[*node].plan.ident, dep_graph[*package_node_update.package].plan.ident, package_node_update.cause);
+                        }
+                        continue;
+                    }
+                }
+                if is_affected {
+                    break;
+                }
             }
-            // filter out updates that are not reverse dependencies of our selected packages
-            if !manually_updated_package_nodes.is_empty() {
-                let mut should_include = false;
-                for manually_updated_package_node in manually_updated_package_nodes.iter() {
-                    if package_node_update
-                        .package
-                        .is_reverse_dependency_of(&dep_graph, manually_updated_package_node)
+            is_affected
+        });
+
+        let mut build_order = algo::toposort(&build_graph, None)
+            .map_err(|err| anyhow!("Cycle detected: {:?}", err))?;
+
+        build_order.reverse();
+
+        info!(
+            "Build order: {:?}",
+            build_order
+                .iter()
+                .map(|node| &dep_graph[*node])
+                .collect::<Vec<&PackageBuild>>()
+        );
+
+        Arc::new(build_order)
+    } else {
+        // Get build order of bootstrap studio
+        let mut bootstrap_studio_build_order = if let Some(bootstrap_studio_package_node) =
+            studio_packages.bootstrap_studio
+        {
+            let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
+                let node = PackageNode(node);
+                let mut is_affected = false;
+                for package_node_update in package_node_updates.iter() {
+                    if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package)
+                        && bootstrap_studio_package_node.is_reverse_dependency_of(&dep_graph, &node)
                     {
-                        should_include = true;
+                        is_affected = true;
                         break;
                     }
                 }
-                if !should_include {
-                    if is_affected {
-                        warn!("Skipping package {} that depends on package {} that was updated due to {}", dep_graph[*node].plan.ident, dep_graph[*package_node_update.package].plan.ident, package_node_update.cause);
+                is_affected
+            });
+            let mut build_order = algo::toposort(&build_graph, None).map_err(|err| {
+                anyhow!("Cycle detected in bootstrap studio build graph: {:?}", err)
+            })?;
+            build_order.reverse();
+            build_order
+        } else {
+            vec![]
+        };
+        // Get build order of studio
+        let mut studio_build_order = if let Some(studio_package_node) = studio_packages.studio {
+            let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
+                let node = PackageNode(node);
+                let mut is_affected = false;
+                for package_node_update in package_node_updates.iter() {
+                    if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package)
+                        && studio_package_node.is_reverse_dependency_of(&dep_graph, &node)
+                    {
+                        is_affected = true;
+                        break;
                     }
-                    continue;
                 }
-            }
-            if is_affected {
-                break;
-            }
+                is_affected
+            });
+            let mut build_order = algo::toposort(&build_graph, None)
+                .map_err(|err| anyhow!("Cycle detected in studio build graph: {:?}", err))?;
+            build_order.reverse();
+            build_order
+        } else {
+            vec![]
+        };
+        // Get build order of all other packages
+        let mut packages_build_order = {
+            let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
+                let node = PackageNode(node);
+                let mut is_affected = false;
+                for package_node_update in package_node_updates.iter() {
+                    // Include a node if:
+                    // - the node is a reverse dependency of an updated package
+                    // - the node is not the dependency of a bootstrap studio package if any
+                    // - the node is not the dependency of a studio package if any
+                    if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package)
+                        && !studio_packages
+                            .bootstrap_studio
+                            .map(|bootstrap_studio_package| {
+                                node.is_dependency_of(&dep_graph, &bootstrap_studio_package)
+                            })
+                            .unwrap_or_default()
+                        && !studio_packages
+                            .studio
+                            .map(|studio_package| {
+                                node.is_dependency_of(&dep_graph, &studio_package)
+                            })
+                            .unwrap_or_default()
+                    {
+                        is_affected = true;
+                    }
+                    // filter out updates that are not reverse dependencies of our selected packages
+                    if !manually_updated_package_nodes.is_empty() {
+                        let mut should_include = false;
+                        for manually_updated_package_node in manually_updated_package_nodes.iter() {
+                            if package_node_update
+                                .package
+                                .is_reverse_dependency_of(&dep_graph, manually_updated_package_node)
+                            {
+                                should_include = true;
+                                break;
+                            }
+                        }
+                        if !should_include {
+                            if is_affected {
+                                warn!("Skipping package {} that depends on package {} that was updated due to {}", dep_graph[*node].plan.ident, dep_graph[*package_node_update.package].plan.ident, package_node_update.cause);
+                            }
+                            continue;
+                        }
+                    }
+                    if is_affected {
+                        break;
+                    }
+                }
+                is_affected
+            });
+            let mut build_order = algo::toposort(&build_graph, None)
+                .map_err(|err| anyhow!("Cycle detected in studio build graph: {:?}", err))?;
+            build_order.reverse();
+            build_order
+        };
+        if !bootstrap_studio_build_order.is_empty() {
+            info!(
+                "Build order for bootstrap studio: {:?}",
+                bootstrap_studio_build_order
+                    .iter()
+                    .map(|node| &dep_graph[*node])
+                    .collect::<Vec<&PackageBuild>>()
+            );
         }
-        is_affected
-    });
+        if !studio_build_order.is_empty() {
+            info!(
+                "Build order for studio: {:?}",
+                studio_build_order
+                    .iter()
+                    .map(|node| &dep_graph[*node])
+                    .collect::<Vec<&PackageBuild>>()
+            );
+        }
+        if !packages_build_order.is_empty() {
+            info!(
+                "Build order for packages: {:?}",
+                packages_build_order
+                    .iter()
+                    .map(|node| &dep_graph[*node])
+                    .collect::<Vec<&PackageBuild>>()
+            );
+        }
 
-    let mut build_order =
-        algo::toposort(&build_graph, None).map_err(|err| anyhow!("Cycle detected: {:?}", err))?;
-
-    build_order.reverse();
-    let build_order = Arc::new(build_order);
-
-    info!(
-        "Build order: {:?}",
-        build_order
-            .iter()
-            .map(|node| &dep_graph[*node])
-            .collect::<Vec<&PackageBuild>>()
-    );
-
+        let mut build_order = Vec::new();
+        build_order.append(&mut bootstrap_studio_build_order);
+        build_order.append(&mut studio_build_order);
+        build_order.append(&mut packages_build_order);
+        Arc::new(build_order)
+    };
     let mut scheduler = Scheduler::new(
         args.session_id.unwrap_or_else(|| {
             let mut generator = Generator::with_naming(Name::Numbered);
