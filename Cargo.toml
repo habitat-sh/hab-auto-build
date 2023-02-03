@@ -26,3 +26,29 @@ inquire = { version = "0.5.2" }
 axum = { version = "0.6" }
 rust-embed = { version = "6.4" }
 mime_guess = { version = "2" }
+tar = { version = "0.4" }
+bzip2 = { version = "0.4" }
+flate2 = { version = "1.0" }
+xz2 = { version = "0.1" }
+zstd = { version = "0.12" }
+infer = "0.12.0"
+async-trait = "0.1.62"
+colored = "2.0"
+goblin = { version = "0.6" }
+askalono = "0.4.6"
+url = { version = "2" , features=["serde"] }
+reqwest = { version = "0.11", features = ["native-tls", "gzip", "deflate", "multipart"] }
+globset = { version = "0.4" }
+sha2 = { version = "0.10" }
+headway = { version = "0.1" }
+
+[build-dependencies]
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+tar = "0.4"
+flate2 = { version = "1.0.11" }
+askalono = "0.4.6"
+reqwest = { version = "0.11" }
+futures = { version = "0.3" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }

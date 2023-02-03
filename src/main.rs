@@ -1,6 +1,8 @@
+mod checker;
 mod server;
 
 use anyhow::{anyhow, Context, Result};
+use checker::{ArtifactChecker, LicenseCheck};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use core::cmp::Ordering;
@@ -15,26 +17,32 @@ use petgraph::{
     visit::{EdgeRef, IntoNodeReferences, NodeFiltered},
     Direction, Graph,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    borrow::Borrow,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env,
     ffi::OsString,
-    fmt::Display,
+    fmt::{self, Display},
+    io::BufRead,
     ops::Deref,
     path::{Path, PathBuf},
     process::Stdio,
+    str::FromStr,
     sync::Arc,
     time::Duration,
 };
+use tar::Archive;
 use tempdir::TempDir;
 use tokio::{
-    fs::File,
+    fs::{self, File},
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::RwLock,
     task::JoinHandle,
 };
 use tracing::{debug, error, info, trace, warn};
+use xz2::bufread::XzDecoder;
 
 lazy_static::lazy_static! {
     static ref PLAN_FILE_LOCATIONS: Vec<PathBuf> = vec![
@@ -50,9 +58,18 @@ lazy_static::lazy_static! {
         PathBuf::from("habitat").join("plan.sh"),
 
     ];
+    static ref FS_ROOT: PathBuf = PathBuf::from("/");
     static ref HAB_PKGS_PATH: PathBuf = {
         let path = PathBuf::from("/hab");
         path.join("pkgs")
+    };
+    static ref HAB_CACHE_SRC_PATH: PathBuf = {
+        let path = PathBuf::from("/hab");
+        path.join("cache").join("src")
+    };
+    static ref HAB_CACHE_ARTIFACTS_PATH: PathBuf = {
+        let path = PathBuf::from("/hab");
+        path.join("cache").join("artifacts")
     };
     static ref PLAN_FILE_NAME: OsString =  OsString::from("plan.sh");
     static ref HAB_DEFAULT_BOOTSTRAP_STUDIO_PACKAGE: PackageDepIdent = PackageDepIdent {
@@ -67,9 +84,278 @@ lazy_static::lazy_static! {
         version: None,
         release: None,
     };
-    static ref SYSTEM_HABITAT: Arc<RwLock<SystemHabitat>> = Arc::new(RwLock::new(SystemHabitat::new("/hab")));
+    pub static ref SYSTEM_HABITAT: Arc<RwLock<SystemHabitat>> = Arc::new(RwLock::new(SystemHabitat::new("/hab")));
     static ref BOOTSTRAP_STUDIO_INSTALLED: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
     static ref STUDIO_INSTALLED: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidFilePath(PathBuf);
+
+impl ValidFilePath {
+    pub async fn new(value: impl AsRef<Path>) -> Result<ValidFilePath> {
+        let path = value.as_ref();
+        let metadata = fs::metadata(path)
+            .await
+            .with_context(|| format!("Failed to open file at path {}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(anyhow!("{} is not a file", path.display()));
+        }
+        Ok(ValidFilePath(path.into()))
+    }
+}
+
+impl AsRef<Path> for ValidFilePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+impl Display for ValidFilePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
+#[derive(Debug)]
+
+pub struct PackageArtifact {
+    pub ident: PackageArtifactIdent,
+    pub path: ValidFilePath,
+}
+
+impl PackageArtifact {
+    pub async fn new(path: &ValidFilePath) -> Result<PackageArtifact> {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let f = std::fs::File::open(path.as_ref())?;
+            let mut reader = std::io::BufReader::new(f);
+
+            // We skip the first 5 lines
+            let mut line = String::new();
+            let mut skip_lines = 5;
+            loop {
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        return Err(anyhow!("The file {} is not a valid .hart file", path));
+                    }
+                    Ok(_) => {
+                        skip_lines -= 1;
+                        if skip_lines == 0 {
+                            break;
+                        } else {
+                            continue;
+                        }
+                    }
+                    Err(err) => {
+                        return Err(anyhow!(
+                            "The file {} is not a valid .hart file: {:?}",
+                            path,
+                            err
+                        ));
+                    }
+                }
+            }
+            let decoder = XzDecoder::new(reader);
+            let mut tar = Archive::new(decoder);
+            let mut entries = tar.entries()?;
+            let first_entry = entries
+                .next()
+                .ok_or_else(|| anyhow!("The file {} is empty", path))??;
+            let first_entry_path = first_entry.path()?;
+            if !first_entry_path.starts_with("hab/pkgs") {
+                return Err(anyhow!(
+                    "Invalid file '{}' in artifact '{}'",
+                    first_entry_path.display(),
+                    path
+                ));
+            }
+            let mut components = first_entry_path
+                .strip_prefix("hab/pkgs/")?
+                .components()
+                .take(4);
+            let origin = components
+                .next()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Invalid file '{}' in artifact '{}', missing package origin",
+                        first_entry_path.display(),
+                        path
+                    )
+                })?
+                .as_os_str()
+                .to_string_lossy()
+                .to_string();
+            let name = components
+                .next()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Invalid file '{}' in artifact '{}', missing package name",
+                        first_entry_path.display(),
+                        path
+                    )
+                })?
+                .as_os_str()
+                .to_string_lossy()
+                .to_string();
+            let version = components
+                .next()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Invalid file '{}' in artifact '{}', missing package version",
+                        first_entry_path.display(),
+                        path
+                    )
+                })?
+                .as_os_str()
+                .to_string_lossy()
+                .to_string();
+            let release = components
+                .next()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Invalid file '{}' in artifact '{}', missing package release",
+                        first_entry_path.display(),
+                        path
+                    )
+                })?
+                .as_os_str()
+                .to_string_lossy()
+                .to_string();
+            let target = path
+                .0
+                .file_name()
+                .and_then(|p| p.to_str())
+                .and_then(|p| {
+                    p.strip_prefix(format!("{}-{}-{}-{}-", origin, name, version, release).as_str())
+                })
+                .and_then(|p| p.strip_suffix(format!(".hart").as_str()))
+                .ok_or(anyhow!("Artifact has a non-standard file name: {}", path))?;
+            let ident = PackageArtifactIdent {
+                origin,
+                name,
+                version,
+                release,
+                target: PackageTarget::try_from(target)?,
+            };
+            Ok(PackageArtifact {
+                ident,
+                path: path.to_owned(),
+            })
+        })
+        .await?
+    }
+    pub fn install_dir(&self) -> PathBuf {
+        PathBuf::from(format!(
+            "/hab/pkgs/{}/{}/{}/{}",
+            self.ident.origin, self.ident.name, self.ident.version, self.ident.release
+        ))
+    }
+    pub async fn install(&self) -> Result<()> {
+        debug!("Installing package from {}", self.ident);
+        let mut system_hab = SYSTEM_HABITAT.write().await;
+        system_hab.pkg_install(self.path.borrow().into()).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageMetadata {
+    pub ident: Option<PackageIdent>,
+    pub deps: HashSet<PackageIdent>,
+    pub build_deps: HashSet<PackageIdent>,
+    pub pkg_config_path: Option<PathBuf>,
+    pub pkg_type: PackageType,
+}
+
+impl PackageMetadata {
+    pub async fn new(install_dir: impl AsRef<Path>) -> Result<PackageMetadata> {
+        let metadata = fs::metadata(install_dir.as_ref()).await?;
+        if !metadata.is_dir() {
+            return Err(anyhow!(
+                "Package installation not found at {}",
+                install_dir.as_ref().display()
+            ));
+        }
+        let ident = fs::read_to_string(install_dir.as_ref().join("IDENT"))
+            .await
+            .context("Package IDENT metafile not found")?;
+        let ident = PackageIdent::try_from(ident.as_str())
+            .with_context(|| format!("Invalid package identifier in IDENT metafile: {}", ident))?;
+        let deps = fs::read_to_string(install_dir.as_ref().join("DEPS"))
+            .await
+            .ok()
+            .map(|data| {
+                data.lines()
+                    .map(|dep| PackageIdent::try_from(dep))
+                    .collect::<Result<HashSet<_>>>()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let build_deps = fs::read_to_string(install_dir.as_ref().join("BUILD_DEPS"))
+            .await
+            .ok()
+            .map(|data| {
+                data.lines()
+                    .map(|dep| PackageIdent::try_from(dep))
+                    .collect::<Result<HashSet<_>>>()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let pkg_config_path = fs::read_to_string(install_dir.as_ref().join("PKG_CONFIG_PATH"))
+            .await
+            .ok()
+            .map(PathBuf::from);
+
+        let pkg_type = PackageType::try_from(
+            fs::read_to_string(install_dir.as_ref().join("PACKAGE_TYPE"))
+                .await
+                .map(|x| x.trim().to_owned())
+                .unwrap_or_else(|err| String::from("standard")),
+        )?;
+
+        Ok(PackageMetadata {
+            ident: Some(ident),
+            deps,
+            build_deps,
+            pkg_config_path,
+            pkg_type,
+        })
+    }
+    pub fn all_runtime_deps(&self) -> impl Iterator<Item = &PackageIdent> {
+        self.ident.iter().chain(self.deps.iter())
+    }
+    pub fn all_deps(&self) -> impl Iterator<Item = &PackageIdent> {
+        self.ident
+            .iter()
+            .chain(self.deps.iter())
+            .chain(self.build_deps.iter())
+    }
+}
+
+pub enum PackageInstallIdent<'a> {
+    DepIdent(&'a PackageDepIdent),
+    ArtifactPath(&'a ValidFilePath),
+}
+
+impl<'a> Display for PackageInstallIdent<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PackageInstallIdent::DepIdent(ident) => write!(f, "{}", ident),
+            PackageInstallIdent::ArtifactPath(path) => write!(f, "{}", path),
+        }
+    }
+}
+
+impl<'a> From<&'a PackageDepIdent> for PackageInstallIdent<'a> {
+    fn from(value: &'a PackageDepIdent) -> Self {
+        PackageInstallIdent::DepIdent(value)
+    }
+}
+
+impl<'a> From<&'a ValidFilePath> for PackageInstallIdent<'a> {
+    fn from(value: &'a ValidFilePath) -> Self {
+        PackageInstallIdent::ArtifactPath(value)
+    }
 }
 
 pub struct SystemHabitat {
@@ -106,7 +392,7 @@ impl SystemHabitat {
             ))
         }
     }
-    pub async fn pkg_install(&mut self, ident: &PackageDepIdent) -> Result<()> {
+    pub async fn pkg_install(&mut self, ident: PackageInstallIdent<'_>) -> Result<()> {
         let exit_status = tokio::process::Command::new("sudo")
             .arg("-E")
             .arg("hab")
@@ -133,6 +419,52 @@ impl SystemHabitat {
     }
 }
 
+pub async fn cache_index(origin: &str, name: &str) -> Result<ArtifactCacheIndex> {
+    let mut cache: ArtifactCacheIndex = HashMap::new();
+    let mut dir = tokio::fs::read_dir(HAB_CACHE_ARTIFACTS_PATH.as_path()).await?;
+    let prefix = format!("{}-{}", origin, name);
+    let mut futures_unordered = FuturesUnordered::new();
+    while let Some(entry) = dir.next_entry().await? {
+        let entry_path = entry.path();
+        if let Some(filename) = entry_path.file_name() {
+            if filename.to_string_lossy().starts_with(&prefix) {
+                futures_unordered.push(async move {
+                    let artifact =
+                        PackageArtifact::new(&ValidFilePath::new(&entry_path).await?).await?;
+                    if artifact.ident.origin == origin && artifact.ident.name == name {
+                        Ok(Some(artifact.ident))
+                    } else {
+                        Ok::<_, anyhow::Error>(None)
+                    }
+                });
+            }
+        }
+    }
+    while let Some(pkg_ident) = futures_unordered.next().await {
+        match pkg_ident {
+            Ok(Some(pkg_ident)) => {
+                cache
+                    .entry(pkg_ident.origin)
+                    .or_default()
+                    .entry(pkg_ident.name)
+                    .or_default()
+                    .entry(pkg_ident.version)
+                    .or_default()
+                    .entry(pkg_ident.target)
+                    .or_default()
+                    .insert(pkg_ident.release);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                error!(
+                    "Error while attempting to read artifact cache entries: {:#}",
+                    err
+                )
+            }
+        }
+    }
+    Ok(cache)
+}
 type ArtifactCacheIndex =
     HashMap<String, HashMap<String, BTreeMap<String, HashMap<PackageTarget, BTreeSet<String>>>>>;
 
@@ -254,6 +586,8 @@ enum Commands {
     Analyze(AnalyzeArgs),
     /// Start a server to interactively explore packages
     Server(ServerArgs),
+    /// Check a habitat artifact for packaging issues
+    Check(CheckArgs),
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -272,7 +606,17 @@ struct ServerArgs {
     #[arg(short, long)]
     port: u16,
 }
-
+#[derive(Debug, Args)]
+struct CheckArgs {
+    /// Path to hab auto build configuration
+    #[arg(short, long)]
+    config_path: Option<PathBuf>,
+    /// Path to habitat artifact that needs to be checked
+    package: Option<String>,
+    /// Only print the summary of issues
+    #[arg(short = 's', long)]
+    only_summary: bool,
+}
 #[derive(Debug, Args)]
 struct AnalyzeArgs {
     /// Path to hab auto build configuration
@@ -424,7 +768,7 @@ impl Repo {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(try_from = "String", into = "String")]
 pub enum PackageType {
     Native,
@@ -435,7 +779,15 @@ impl TryFrom<String> for PackageType {
     type Error = anyhow::Error;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.as_str() {
+        PackageType::try_from(value.as_str())
+    }
+}
+
+impl TryFrom<&str> for PackageType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
             "native" => Ok(PackageType::Native),
             "standard" => Ok(PackageType::Standard),
             _ => Err(anyhow!("Unknown package type: {}", value)),
@@ -701,6 +1053,8 @@ pub struct PlanMetadata {
     pub source: PathBuf,
     pub repo: PathBuf,
     pub ident: PackageBuildIdent,
+    pub pkg_source: String,
+    pub pkg_shasum: String,
     pub deps: Vec<PackageDepIdent>,
     pub build_deps: Vec<PackageDepIdent>,
 }
@@ -835,6 +1189,16 @@ impl PackageIdent {
             target,
         }
     }
+    pub fn install_dir(&self) -> PathBuf {
+        let mut path = PathBuf::new();
+        path.push("hab");
+        path.push("pkgs");
+        path.push(&self.origin);
+        path.push(&self.name);
+        path.push(&self.version);
+        path.push(&self.release);
+        path
+    }
 }
 
 impl TryFrom<String> for PackageIdent {
@@ -853,7 +1217,7 @@ impl TryFrom<&str> for PackageIdent {
         let mut name = None;
         let mut version = None;
         let mut release = None;
-        for (index, part) in value.split('/').enumerate() {
+        for (index, part) in value.trim().split('/').enumerate() {
             match index {
                 0 => origin = Some(String::from(part)),
                 1 => name = Some(String::from(part)),
@@ -876,6 +1240,16 @@ impl From<PackageIdent> for String {
         value.to_string()
     }
 }
+impl From<&PackageIdent> for PathBuf {
+    fn from(value: &PackageIdent) -> Self {
+        let mut path = PathBuf::new();
+        path.push(value.origin.to_owned());
+        path.push(value.name.to_owned());
+        path.push(value.version.to_owned());
+        path.push(value.release.to_owned());
+        path
+    }
+}
 
 impl std::fmt::Display for PackageIdent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -894,6 +1268,17 @@ impl From<PackageArtifactIdent> for PackageIdent {
             name: ident.name,
             version: ident.version,
             release: ident.release,
+        }
+    }
+}
+
+impl From<&PackageArtifactIdent> for PackageIdent {
+    fn from(ident: &PackageArtifactIdent) -> Self {
+        PackageIdent {
+            origin: ident.origin.clone(),
+            name: ident.name.clone(),
+            version: ident.version.clone(),
+            release: ident.release.clone(),
         }
     }
 }
@@ -960,9 +1345,9 @@ impl PackageDepIdent {
     pub async fn latest_artifact(
         &self,
         target: PackageTarget,
-        scripts: &Scripts,
+        _scripts: &Scripts,
     ) -> Result<Option<PackageArtifactIdent>> {
-        let cache_index = scripts.cache_index(&self.origin, &self.name).await.unwrap();
+        let cache_index = cache_index(&self.origin, &self.name).await.unwrap();
         if let Some(version_index) = cache_index
             .get(&self.origin)
             .and_then(|c| c.get(&self.name))
@@ -1279,33 +1664,6 @@ impl Scripts {
         })
     }
 
-    pub async fn cache_index(&self, origin: &str, name: &str) -> Result<ArtifactCacheIndex> {
-        let output = tokio::process::Command::new("bash")
-            .arg(self.script_paths.get("cache_index.sh").unwrap().as_path())
-            .arg(origin)
-            .arg(name)
-            .output()
-            .await?;
-        let cache_data = String::from_utf8_lossy(output.stdout.as_slice());
-        let mut cache: ArtifactCacheIndex = HashMap::new();
-        for line in cache_data.lines() {
-            let parts = line.split('=').collect::<Vec<_>>();
-            let pkg_ident = PackageIdent::try_from(parts[0])?;
-            let pkg_artifact = PackageArtifactIdent::parse_with_ident(parts[1], &pkg_ident)?;
-            cache
-                .entry(pkg_ident.origin)
-                .or_default()
-                .entry(pkg_ident.name)
-                .or_default()
-                .entry(pkg_ident.version)
-                .or_default()
-                .entry(pkg_artifact.target)
-                .or_default()
-                .insert(pkg_artifact.release);
-        }
-        Ok(cache)
-    }
-
     pub async fn metadata_extract(
         &self,
         target: PackageTarget,
@@ -1564,7 +1922,7 @@ async fn dep_graph_build(
                 }
             }
         }
-        for (_ident, (node, metadata)) in packages.iter() {
+        for (_ident, (node, _metadata)) in packages.iter() {
             dep_graph.package_mut(node).studio_type = match dep_graph.package(node).package_type {
                 PackageType::Native => Some(PackageStudioType::Native),
                 PackageType::Standard => match &studio_packages.studio {
@@ -1791,6 +2149,97 @@ async fn serve(args: ServerArgs) -> Result<()> {
     Ok(())
 }
 
+async fn check(args: CheckArgs) -> Result<()> {
+    let scripts = Arc::new(Scripts::new().await?);
+
+    if let Some(package) = args.package {
+        let dep_ident = PackageDepIdent::try_from(package)?;
+
+        let artifact = dep_ident
+            .latest_artifact(PackageTarget::default(), &scripts)
+            .await?
+            .ok_or_else(|| anyhow!("No package artifact found for {}", dep_ident))?;
+        let artifact_path =
+            ValidFilePath::new(HAB_CACHE_ARTIFACTS_PATH.join(format!("{}", artifact))).await?;
+
+        let artifact = PackageArtifact::new(&artifact_path).await?;
+        artifact
+            .install()
+            .await
+            .with_context(|| format!("Failed to install artifact {}", artifact.path))?;
+        let metadata = PackageMetadata::new(artifact.install_dir()).await?;
+        let mut checker = ArtifactChecker::new(artifact, &metadata, FS_ROOT.as_path()).await?;
+        let report = checker.check().await.with_context(|| {
+            format!(
+                "There were issues while checking artifact {}",
+                artifact_path.as_ref().display()
+            )
+        })?;
+        report.print(args.only_summary);
+        Ok(())
+    } else {
+        let config_path = args
+            .config_path
+            .unwrap_or(env::current_dir()?.join("hab-auto-build.json"));
+
+        let auto_build_config = HabitatAutoBuildConfiguration::new(config_path)
+            .await
+            .context("Failed to load habitat auto build configuration")?;
+
+        let (dep_graph, _manually_updated_package_nodes, package_node_updates, _studio_packages) =
+            dep_graph_build(
+                vec![],
+                &auto_build_config,
+                false,
+                true,
+                None,
+                scripts.clone(),
+            )
+            .await?;
+
+        let mut check_order = algo::toposort(&*dep_graph, None)
+            .map_err(|err| anyhow!("Cycle detected: {:?}", err))?;
+
+        check_order.reverse();
+        debug!(
+            "Check order: {:?}",
+            check_order
+                .iter()
+                .map(|node| &dep_graph[*node])
+                .collect::<Vec<&PackageBuild>>()
+        );
+        info!("Checking {} packages", check_order.len());
+
+        for item in check_order {
+            let dep_ident = PackageDepIdent::from(&dep_graph[item].plan.ident);
+
+            let artifact = dep_ident
+                .latest_artifact(PackageTarget::default(), &scripts)
+                .await?
+                .ok_or_else(|| anyhow!("No package artifact found for {}", dep_ident))?;
+            let artifact_path =
+                ValidFilePath::new(HAB_CACHE_ARTIFACTS_PATH.join(format!("{}", artifact))).await?;
+
+            let artifact = PackageArtifact::new(&artifact_path).await?;
+            artifact
+                .install()
+                .await
+                .with_context(|| format!("Failed to install artifact {}", artifact.path))?;
+            let metadata = PackageMetadata::new(artifact.install_dir()).await?;
+            let mut checker = ArtifactChecker::new(artifact, &metadata, FS_ROOT.as_path()).await?;
+            let report = checker.check().await.with_context(|| {
+                format!(
+                    "There were issues while checking artifact {}",
+                    artifact_path.as_ref().display()
+                )
+            })?;
+            report.print(args.only_summary);
+        }
+
+        Ok(())
+    }
+}
+
 async fn build(args: BuildArgs) -> Result<()> {
     let scripts = Arc::new(Scripts::new().await?);
     let manually_updated_package_idents = args
@@ -1952,33 +2401,32 @@ async fn build(args: BuildArgs) -> Result<()> {
         Arc::new(build_order)
     } else {
         // Get build order of bootstrap studio
-        let mut bootstrap_studio_build_order = if let Some(bootstrap_studio_package_node) =
-            studio_packages.bootstrap_studio
-        {
-            let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
-                let node = PackageNode(node);
-                let mut is_affected = false;
-                for package_node_update in package_node_updates.iter() {
-                    // Include a node if:
-                    // - the node is a reverse dependency of an updated package
-                    // - the node is the dependency of the bootstrap studio package
-                    if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package)
-                        && node.is_dependency_of(&dep_graph, &bootstrap_studio_package_node)
-                    {
-                        is_affected = true;
-                        break;
+        let mut bootstrap_studio_build_order =
+            if let Some(bootstrap_studio_package_node) = studio_packages.bootstrap_studio {
+                let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
+                    let node = PackageNode(node);
+                    let mut is_affected = false;
+                    for package_node_update in package_node_updates.iter() {
+                        // Include a node if:
+                        // - the node is a reverse dependency of an updated package
+                        // - the node is the dependency of the bootstrap studio package
+                        if node.is_reverse_dependency_of(&dep_graph, &package_node_update.package)
+                            && node.is_dependency_of(&dep_graph, &bootstrap_studio_package_node)
+                        {
+                            is_affected = true;
+                            break;
+                        }
                     }
-                }
-                is_affected
-            });
-            let mut build_order = algo::toposort(&build_graph, None).map_err(|err| {
-                anyhow!("Cycle detected in bootstrap studio build graph: {:?}", err)
-            })?;
-            build_order.reverse();
-            build_order
-        } else {
-            vec![]
-        };
+                    is_affected
+                });
+                let mut build_order = algo::toposort(&build_graph, None).map_err(|err| {
+                    anyhow!("Cycle detected in bootstrap studio build graph: {:?}", err)
+                })?;
+                build_order.reverse();
+                build_order
+            } else {
+                vec![]
+            };
         // Get build order of studio
         let mut studio_build_order = if let Some(studio_package_node) = studio_packages.studio {
             let build_graph = NodeFiltered::from_fn(&*dep_graph, |node| {
@@ -2131,6 +2579,9 @@ async fn build(args: BuildArgs) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     // a builder for `FmtSubscriber`.
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "hab_auto_build=info");
+    }
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
@@ -2140,6 +2591,7 @@ async fn main() -> Result<()> {
         Commands::Visualize(args) => visualize(args).await,
         Commands::Analyze(args) => analyze(args).await,
         Commands::Server(args) => serve(args).await,
+        Commands::Check(args) => check(args).await,
     }
 }
 
@@ -2247,7 +2699,7 @@ impl<'a> PackageBuilder<'a> {
                 pkg_deps.push(format!("{}", resolved_dep.display()))
             }
         }
-
+        let mut fs_root = FS_ROOT.clone();
         let mut child = match build.studio_type {
             Some(PackageStudioType::Native) => {
                 info!(
@@ -2281,9 +2733,9 @@ impl<'a> PackageBuilder<'a> {
                         if !*is_bootstrap_studio_installed {
                             let mut sys_hab = SYSTEM_HABITAT.write().await;
                             let bootstrap_studio_package =
-                                bootstrap_studio_package.as_ref().ok_or(anyhow!(
-                                    "Bootstrap studio package has not been specified"
-                                ))?;
+                                bootstrap_studio_package.as_ref().ok_or_else(|| {
+                                    anyhow!("Bootstrap studio package has not been specified")
+                                })?;
                             info!(
                                 "Installing bootstrap studio package: {}",
                                 bootstrap_studio_package
@@ -2297,7 +2749,10 @@ impl<'a> PackageBuilder<'a> {
                                 });
                             sys_hab
                                 .pkg_install(
-                                    studio_ident.as_ref().unwrap_or(bootstrap_studio_package),
+                                    studio_ident
+                                        .as_ref()
+                                        .unwrap_or(bootstrap_studio_package)
+                                        .into(),
                                 )
                                 .await?;
                             *is_bootstrap_studio_installed = true;
@@ -2310,6 +2765,9 @@ impl<'a> PackageBuilder<'a> {
                     repo.display(),
                     build.build_log_file(&session_id).display()
                 );
+                fs_root = PathBuf::from("/hab")
+                    .join("studios")
+                    .join(format!("hab-auto-build-{}", session_id,));
                 tokio::process::Command::new("sudo")
                     .arg("-E")
                     .arg("hab")
@@ -2320,11 +2778,7 @@ impl<'a> PackageBuilder<'a> {
                     .arg("-t")
                     .arg("bootstrap")
                     .arg("-r")
-                    .arg(
-                        PathBuf::from("/hab")
-                            .join("studios")
-                            .join(format!("hab-auto-build-{}", session_id,)),
-                    )
+                    .arg(&fs_root)
                     .arg("build")
                     .arg(source)
                     .env(
@@ -2356,7 +2810,7 @@ impl<'a> PackageBuilder<'a> {
                             let mut sys_hab = SYSTEM_HABITAT.write().await;
                             let studio_package = studio_package
                                 .as_ref()
-                                .ok_or(anyhow!("Studio package has not been specified"))?;
+                                .ok_or_else(|| anyhow!("Studio package has not been specified"))?;
                             info!("Installing studio package: {}", studio_package);
                             let studio_ident = studio_package
                                 .latest_artifact(PackageTarget::default(), &scripts)
@@ -2364,7 +2818,7 @@ impl<'a> PackageBuilder<'a> {
                                 .context("Failed to determine latest artifact for studio package")?
                                 .map(|artifact_ident| PackageDepIdent::from(&artifact_ident));
                             sys_hab
-                                .pkg_install(studio_ident.as_ref().unwrap_or(studio_package))
+                                .pkg_install(studio_ident.as_ref().unwrap_or(studio_package).into())
                                 .await?;
                             *is_studio_installed = true;
                         }
@@ -2376,17 +2830,17 @@ impl<'a> PackageBuilder<'a> {
                     repo.display(),
                     build.build_log_file(&session_id).display()
                 );
+
+                fs_root = PathBuf::from("/hab")
+                    .join("studios")
+                    .join(format!("hab-auto-build-{}", session_id));
                 tokio::process::Command::new("sudo")
                     .arg("-E")
                     .arg("hab")
                     .arg("pkg")
                     .arg("build")
                     .arg("-r")
-                    .arg(
-                        PathBuf::from("/hab")
-                            .join("studios")
-                            .join(format!("hab-auto-build-{}", session_id)),
-                    )
+                    .arg(&fs_root)
                     .arg(source)
                     .env("HAB_LICENSE", "accept-no-persist")
                     .env("HAB_STUDIO_INSTALL_PKGS", pkg_deps.join(":"))
@@ -2431,7 +2885,11 @@ impl<'a> PackageBuilder<'a> {
                             build_log_file.write_all(b"\n").await?;
                         },
                         Ok(None) => continue,
-                        Err(err) => return Err(anyhow!("Failed to write build process output from stdout: {:?}", err)),
+                        Err(err) => {
+                            error!("Failed to write build process output from stdout: {}", err);
+                            build_log_file.write_all(b"NON UTF-8 DATA\n").await?;
+                            continue
+                        },
                     }
                 }
                 result = stderr_reader.next_line() => {
@@ -2441,7 +2899,11 @@ impl<'a> PackageBuilder<'a> {
                             build_log_file.write_all(b"\n").await?;
                         }
                         Ok(None) => continue,
-                        Err(err) => return Err(anyhow!("Failed to write build process output from stderr: {:?}", err)),
+                        Err(err) => {
+                            error!("Failed to write build process output from stdout: {}", err);
+                            build_log_file.write_all(b"NON UTF-8 DATA\n").await?;
+                            continue
+                        }
                     }
                 }
                 result = child.wait() => {
@@ -2472,6 +2934,31 @@ impl<'a> PackageBuilder<'a> {
                                         *is_bootstrap_studio_installed = false;
                                     }
                                 }
+
+                                // Install and check the package after building it
+                                let dep_ident = PackageDepIdent::from(&build.plan.ident);
+                                let artifact = dep_ident
+                                    .latest_artifact(build.plan.ident.target, &scripts)
+                                    .await?
+                                    .ok_or_else(|| anyhow!("No package artifact found for {}", dep_ident))?;
+                                let artifact_path =
+                                    ValidFilePath::new(HAB_CACHE_ARTIFACTS_PATH.join(format!("{}", artifact))).await?;
+
+                                let artifact = PackageArtifact::new(&artifact_path).await?;
+                                artifact
+                                    .install()
+                                    .await
+                                    .with_context(|| format!("Failed to install artifact {}", artifact.path))?;
+                                let metadata = PackageMetadata::new(artifact.install_dir()).await?;
+                                let mut checker = ArtifactChecker::new(artifact, &metadata, fs_root).await?;
+                                info!("Verifying package artifact {}", artifact_path.as_ref().display());
+                                let report = checker.check().await.with_context(|| {
+                                    format!(
+                                        "There were issues while checking artifact {}",
+                                        artifact_path.as_ref().display()
+                                    )
+                                })?;
+                                report.print(false);
                                 return Ok(())
                             } else {
                                 error!(worker = worker_index, "Failed to build {:?}, build process exited with {}, please the build log for errors: {}", build.plan, exit_code, build.build_log_file(&session_id).display());

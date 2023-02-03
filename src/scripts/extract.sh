@@ -43,6 +43,8 @@ echo "{ \
 \"version\": \"${pkg_version}\", \
 \"target\": \"${pkg_target}\" \
 }, \
+\"pkg_source\": \"${pkg_source}\",\
+\"pkg_shasum\": \"${pkg_shasum}\",\
 \"deps\": $(json_array ${pkg_deps[@]}), \
 \"build_deps\": $(json_array ${pkg_build_deps[@]})\
 }"
