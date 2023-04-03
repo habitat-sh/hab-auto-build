@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
-use color_eyre::eyre::{eyre, Result};
+use color_eyre::{
+    eyre::{eyre, Context, Result},
+    Help, SectionExt,
+};
 use diesel::Connection;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use goblin::{
@@ -17,22 +20,24 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
-    io::{BufRead, BufReader, Read},
+    fmt::Display,
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::mpsc::{channel, Sender},
     time::Instant,
 };
 use tar::Archive;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 use xz2::bufread::XzDecoder;
 
 use crate::store::{self, Store};
 
 use super::{
-    Blake3, FSRootPath, FileKind, HabitatRootPath, PackageDepIdent, PackageIdent, PackageName,
-    PackageOrigin, PackagePath, PackageRelease, PackageResolvedDepIdent, PackageResolvedRelease,
-    PackageResolvedVersion, PackageSha256Sum, PackageSource, PackageSourceURL, PackageTarget,
-    PackageType, PackageVersion, PlanContextID,
+    Blake3, FSRootPath, FileKind, HabitatRootPath, PackageBuildVersion, PackageDepIdent,
+    PackageIdent, PackageName, PackageOrigin, PackagePath, PackageRelease, PackageResolvedDepIdent,
+    PackageResolvedRelease, PackageResolvedVersion, PackageSha256Sum, PackageSource,
+    PackageSourceURL, PackageTarget, PackageType, PackageVersion, PlanContextID,
 };
 
 lazy_static! {
@@ -59,6 +64,7 @@ lazy_static! {
         globset_builder.build().unwrap()
     };
 }
+const ARTIFACT_DATA_EXTRACT_SCRIPT: &[u8] = include_bytes!("../scripts/artifact_data_extract.sh");
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub(crate) struct ArtifactCachePath(PathBuf);
@@ -66,6 +72,9 @@ pub(crate) struct ArtifactCachePath(PathBuf);
 impl ArtifactCachePath {
     pub fn new(hab_root: HabitatRootPath) -> ArtifactCachePath {
         ArtifactCachePath(hab_root.as_ref().join("cache").join("artifacts"))
+    }
+    pub fn artifact_path(&self, ident: &PackageIdent) -> ArtifactPath {
+        ArtifactPath(self.0.join(ident.artifact_name()))
     }
 }
 
@@ -77,7 +86,13 @@ impl AsRef<Path> for ArtifactCachePath {
 
 impl Default for ArtifactCachePath {
     fn default() -> Self {
-        ArtifactCachePath::new(HabitatRootPath::default())
+        ArtifactCachePath(
+            FSRootPath::default().as_ref().join(
+                &["hab", "cache", "artifacts"]
+                    .into_iter()
+                    .collect::<PathBuf>(),
+            ),
+        )
     }
 }
 
@@ -102,14 +117,18 @@ type ArtifactList = HashMap<
 >;
 
 pub(crate) struct ArtifactCache {
+    pub path: ArtifactCachePath,
     known_artifacts: ArtifactList,
 }
 
 impl ArtifactCache {
     pub fn new(artifact_cache_path: ArtifactCachePath, store: &Store) -> Result<ArtifactCache> {
         let start = Instant::now();
-        let mut known_artifacts = ArtifactList::default();
-        let artifact_cache_walker = WalkBuilder::new(artifact_cache_path.as_ref()).build_parallel();
+        let mut artifact_cache = ArtifactCache {
+            path: artifact_cache_path,
+            known_artifacts: ArtifactList::default(),
+        };
+        let artifact_cache_walker = WalkBuilder::new(artifact_cache.path.as_ref()).build_parallel();
         std::thread::scope(|scope| {
             let (sender, receiver) = channel();
             let mut artifact_indexer_builder = ArtifactIndexerBuilder::new(store, sender);
@@ -117,44 +136,55 @@ impl ArtifactCache {
                 scope.spawn(move || artifact_cache_walker.visit(&mut artifact_indexer_builder));
             let mut known_artifact_count = 0;
             let mut new_artifact_count = 0;
+
             while let Ok(artifact_ctx) = receiver.recv() {
                 if artifact_ctx.is_dirty {
                     new_artifact_count += 1;
-                    store
-                        .get_connection()?
-                        .immediate_transaction(|connection| {
-                            store::artifact_context_put(
-                                connection,
-                                &artifact_ctx.hash,
-                                &artifact_ctx,
-                            )
-                        })?;
                 }
                 known_artifact_count += 1;
-
-                known_artifacts
-                    .entry(artifact_ctx.id.origin.clone())
-                    .or_default()
-                    .entry(artifact_ctx.id.name.clone())
-                    .or_default()
-                    .entry(artifact_ctx.id.target)
-                    .or_default()
-                    .entry(artifact_ctx.id.version.clone())
-                    .or_default()
-                    .entry(artifact_ctx.id.release.clone())
-                    .or_insert(artifact_ctx);
+                artifact_cache.artifact_add(store, artifact_ctx)?;
             }
             artifact_indexer_thread
                 .join()
                 .expect("Failed to join artifact indexer thread to parent thread");
             info!(
-                "Detected {} artifacts ({} new artifacts) in {}s",
+                "Detected {} artifacts at {} ({} new artifacts) in {}s",
                 known_artifact_count,
+                artifact_cache.path.as_ref().display(),
                 new_artifact_count,
                 start.elapsed().as_secs_f32()
             );
-            Ok(ArtifactCache { known_artifacts })
+            Ok(artifact_cache)
         })
+    }
+
+    pub fn artifact_add(
+        &mut self,
+        store: &Store,
+        artifact_ctx: ArtifactContext,
+    ) -> Result<PackageIdent> {
+        let artifact_ident = artifact_ctx.id.clone();
+        if artifact_ctx.is_dirty {
+            store
+                .get_connection()?
+                .immediate_transaction(|connection| {
+                    store::artifact_context_put(connection, &artifact_ctx.hash, &artifact_ctx)
+                })?;
+            trace!("Added artifact {} to store", artifact_ident);
+        }
+        self.known_artifacts
+            .entry(artifact_ctx.id.origin.clone())
+            .or_default()
+            .entry(artifact_ctx.id.name.clone())
+            .or_default()
+            .entry(artifact_ctx.id.target)
+            .or_default()
+            .entry(artifact_ctx.id.version.clone())
+            .or_default()
+            .entry(artifact_ctx.id.release.clone())
+            .or_insert(artifact_ctx);
+        trace!("Indexed artifact {}", artifact_ident);
+        Ok(artifact_ident)
     }
 
     pub fn latest_plan_artifact(&self, build_ident: &PlanContextID) -> Option<&ArtifactContext> {
@@ -164,8 +194,8 @@ impl ArtifactCache {
             .and_then(|a| a.get(&build_ident.name))
             .and_then(|a| a.get(&build_ident.target))
             .and_then(|a| match &build_ident.version {
-                version @ PackageResolvedVersion::Static(_) => a.get(version),
-                PackageResolvedVersion::Dynamic => a.values().rev().next(),
+                PackageBuildVersion::Static(version) => a.get(version),
+                PackageBuildVersion::Dynamic => a.values().rev().next(),
             })
             .and_then(|a| a.values().rev().next())
     }
@@ -176,13 +206,8 @@ impl ArtifactCache {
             .and_then(|a| a.get(&dep_ident.name))
             .and_then(|a| a.get(&dep_ident.target))
             .and_then(|a| match &dep_ident.version {
-                PackageVersion::Resolved(version @ PackageResolvedVersion::Static(_)) => {
-                    a.get(version)
-                }
-                PackageVersion::Unresolved
-                | PackageVersion::Resolved(PackageResolvedVersion::Dynamic) => {
-                    a.values().rev().next()
-                }
+                PackageVersion::Resolved(version) => a.get(version),
+                PackageVersion::Unresolved => a.values().rev().next(),
             })
             .and_then(|a| match &dep_ident.release {
                 PackageRelease::Resolved(release) => a.get(release),
@@ -224,6 +249,18 @@ pub(crate) enum ElfType {
     Other,
 }
 
+impl Display for ElfType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ElfType::Executable => write!(f, "executable"),
+            ElfType::SharedLibrary => write!(f, "shared-library"),
+            ElfType::PieExecutable => write!(f, "pie-executable"),
+            ElfType::Relocatable => write!(f, "relocatable"),
+            ElfType::Other => write!(f, "other"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ScriptMetadata {
     pub interpreter: ScriptInterpreterMetadata,
@@ -235,6 +272,11 @@ pub(crate) struct ScriptInterpreterMetadata {
     pub raw: String,
     pub command: PathBuf,
     pub args: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RawArtifactData {
+    pub licenses: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -262,182 +304,10 @@ pub(crate) struct ArtifactContext {
 }
 
 impl ArtifactContext {
-    /// Search for an executable with the given name.
-    /// This function only returns a result if the found executable
-    /// has the executable permission set.
-    pub fn search_runtime_executable(
-        &self,
-        executable_name: impl AsRef<Path>,
-    ) -> Option<ExecutableMetadata<'_>> {
-        for path in self.runtime_path.iter() {
-            let executable_path = path.join(executable_name.as_ref());
-
-            if let Some(metadata) = self.elfs.get(&executable_path) {
-                if metadata.is_executable {
-                    return Some(ExecutableMetadata::Elf(metadata));
-                }
-            }
-            if let Some(metadata) = self.scripts.get(&executable_path) {
-                if metadata.is_executable {
-                    return Some(ExecutableMetadata::Script(metadata));
-                }
-            }
-        }
-        None
-    }
-
-    /// Search for an executable with the given name.
-    /// This function returns a result regardless of it's
-    /// executable permission bit.
-    pub fn search_runtime(
-        &self,
-        executable_name: impl AsRef<Path>,
-    ) -> Option<ExecutableMetadata<'_>> {
-        for path in self.runtime_path.iter() {
-            let executable_path = path.join(executable_name.as_ref());
-            if let Some(metadata) = self.elfs.get(&executable_path) {
-                return Some(ExecutableMetadata::Elf(metadata));
-            }
-            if let Some(metadata) = self.scripts.get(&executable_path) {
-                return Some(ExecutableMetadata::Script(metadata));
-            }
-        }
-        None
-    }
-
-    pub fn resolve_path(
-        &self,
-        tdeps: &HashMap<PackageIdent, ArtifactContext>,
-        path: impl AsRef<Path>,
-    ) -> PathBuf {
-        let mut current_artifact = Some(self);
-        let mut resolved_path = path.as_ref().to_path_buf();
-        while let Some(artifact_ctx) = current_artifact {
-            if let Some(link) = artifact_ctx.links.get(resolved_path.as_path()) {
-                let link = if link.is_absolute() {
-                    link.to_path_buf()
-                } else {
-                    resolved_path
-                        .parent()
-                        .unwrap()
-                        .join(link)
-                        .absolutize()
-                        .unwrap()
-                        .to_path_buf()
-                };
-                if let Some(next_artifact_ctx) = link.package_ident(artifact_ctx.target) {
-                    if next_artifact_ctx == artifact_ctx.id
-                        && artifact_ctx.links.get(&link).is_none()
-                    {
-                        resolved_path = link.to_path_buf();
-                        current_artifact = None;
-                    } else {
-                        current_artifact = tdeps.get(&next_artifact_ctx);
-                        resolved_path = link.to_path_buf();
-                    }
-                }
-            } else {
-                let mut current_parent = resolved_path.parent();
-                let mut is_in_symlinked_dir = false;
-                while let Some(parent) = current_parent {
-                    if let Some(parent_link) = artifact_ctx.links.get(parent) {
-                        let parent_link = if parent_link.is_absolute() {
-                            parent_link.to_path_buf()
-                        } else {
-                            parent
-                                .parent()
-                                .unwrap()
-                                .join(parent_link)
-                                .absolutize()
-                                .unwrap()
-                                .to_path_buf()
-                        };
-                        resolved_path = parent_link
-                            .join(resolved_path.strip_prefix(parent).unwrap());
-                        is_in_symlinked_dir = true;
-                        break;
-                    } else {
-                        current_parent = parent.parent()
-                    }
-                }
-                if is_in_symlinked_dir {
-                    if let Some(next_artifact_ctx) =
-                        resolved_path.package_ident(artifact_ctx.target)
-                    {
-                        current_artifact = tdeps.get(&next_artifact_ctx);
-                    } else {
-                        current_artifact = None;
-                    }
-                } else {
-                    current_artifact = None;
-                }
-            }
-        }
-        resolved_path
-    }
-}
-
-pub(crate) enum ExecutableMetadata<'a> {
-    Elf(&'a ElfMetadata),
-    Script(&'a ScriptMetadata),
-}
-
-pub(crate) struct ArtifactIndexer<'a> {
-    store: &'a Store,
-    sender: Sender<ArtifactContext>,
-}
-
-impl<'a> ParallelVisitor for ArtifactIndexer<'a> {
-    fn visit(
-        &mut self,
-        entry: std::result::Result<ignore::DirEntry, ignore::Error>,
-    ) -> ignore::WalkState {
-        if let Ok(entry) = entry {
-            if let Some("hart") = entry.path().extension().and_then(OsStr::to_str) {
-                let hash = Blake3::from_path(entry.path()).unwrap_or_else(|_| {
-                    panic!(
-                        "Failed to generate hash for artifact {}",
-                        entry.path().display()
-                    )
-                });
-                if let Some(artifact_ctx) = self
-                    .store
-                    .get_connection()
-                    .expect("Failed to open connection to hab-auto-build sqlite database")
-                    .transaction(|connection| store::artifact_context_get(connection, &hash))
-                    .expect("Failed to read artifact context from hab-auto-build sqlite database")
-                {
-                    debug!("Artifact {} loaded from cache", artifact_ctx.id);
-                    self.sender
-                        .send(artifact_ctx)
-                        .expect("Failed to send artifact context to parent thread");
-                } else {
-                    match ArtifactIndexer::read_from_disk(entry.path(), &hash) {
-                        Ok(artifact_ctx) => {
-                            debug!("Artifact {} loaded from disk", artifact_ctx.id);
-                            self.sender
-                                .send(artifact_ctx)
-                                .expect("Failed to send artifact context to parent thread");
-                        }
-                        Err(err) => {
-                            error!(
-                                "Failed to read contents of package artifact '{}': {}",
-                                entry.path().display(),
-                                err
-                            );
-                        }
-                    }
-                }
-            } else {
-                return WalkState::Continue;
-            }
-        }
-        WalkState::Continue
-    }
-}
-
-impl<'a> ArtifactIndexer<'a> {
-    fn read_from_disk(artifact_path: impl AsRef<Path>, hash: &Blake3) -> Result<ArtifactContext> {
+    pub fn read_from_disk(
+        artifact_path: impl AsRef<Path>,
+        hash: Option<&Blake3>,
+    ) -> Result<ArtifactContext> {
         let f = std::fs::File::open(artifact_path.as_ref())?;
         let created_at = f.metadata()?.modified()?;
         let mut reader = std::io::BufReader::new(f);
@@ -589,6 +459,8 @@ impl<'a> ArtifactIndexer<'a> {
                         let mut entry = BufReader::new(entry);
                         let mut pkg_source = None;
                         let mut pkg_shasum = None;
+                        let mut plan_source = String::new();
+                        let mut plan_source_header_read = false;
                         loop {
                             let mut line = String::new();
                             match entry.read_line(&mut line) {
@@ -612,12 +484,11 @@ impl<'a> ArtifactIndexer<'a> {
                                         let patterns: &[_] = &[' ', '`', '\n'];
                                         pkg_shasum = Some(value.trim_matches(patterns).to_owned());
                                     }
-                                    if let Some(value) = line.strip_prefix("* __License__:") {
-                                        licenses = value
-                                            .trim()
-                                            .split(' ')
-                                            .map(String::from)
-                                            .collect::<Vec<String>>();
+                                    if plan_source_header_read {
+                                        plan_source.push_str(&line);
+                                    }
+                                    if line.starts_with("## Plan Source") {
+                                        plan_source_header_read = true;
                                     }
                                 }
                                 Err(err) => {
@@ -632,6 +503,16 @@ impl<'a> ArtifactIndexer<'a> {
                                 shasum: PackageSha256Sum::from(shasum),
                             })
                         }
+                        plan_source = plan_source
+                            .split_once("```bash")
+                            .unwrap()
+                            .1
+                            .rsplit_once("```")
+                            .unwrap()
+                            .0
+                            .to_string();
+                        licenses =
+                            ArtifactContext::extract_licenses_from_plan_source(&plan_source)?;
                     }
                     _ => {}
                 }
@@ -673,6 +554,16 @@ impl<'a> ArtifactIndexer<'a> {
             .into_iter()
             .map(|d| d.to_resolved_dep_ident(target).to_ident().unwrap())
             .collect();
+        let hash = if let Some(hash) = hash {
+            hash.clone()
+        } else {
+            Blake3::from_path(artifact_path.as_ref()).with_context(|| {
+                format!(
+                    "Failed to generate hash for artifact {}",
+                    artifact_path.as_ref().display(),
+                )
+            })?
+        };
         Ok(ArtifactContext {
             id,
             target,
@@ -694,6 +585,226 @@ impl<'a> ArtifactIndexer<'a> {
             is_dirty: true,
             created_at: DateTime::<Utc>::from(created_at),
         })
+    }
+
+    fn extract_licenses_from_plan_source(plan_source: &str) -> Result<Vec<String>> {
+        let mut child =  Command::new("bash")
+            .arg("-s")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Failed to execute bash shell")
+            .with_suggestion(|| "Make sure you have bash installed on your system, and that it's location is included in your PATH")?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("Failed to acquire stdin to bash process");
+        stdin.write_all(plan_source.as_bytes())?;
+        stdin.write_all(ARTIFACT_DATA_EXTRACT_SCRIPT)?;
+        stdin.flush()?;
+        drop(stdin);
+        let output = child.wait_with_output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if output.status.success() {
+            let raw_data: RawArtifactData = serde_json::from_slice(&output.stdout)
+                .context("Failed to read extracted JSON data from plan source in MANIFEST")
+                .with_section(move || stdout.header("stdout: "))
+                .with_section(move || stderr.header("stderr: "))
+                .with_suggestion(|| "Ensure your plan file does not generate output outside the standard functions like 'do_begin', 'do_prepare', 'do_build', 'do_check' and 'do_install'")?;
+            Ok(raw_data.licenses)
+        } else {
+            Err(eyre!(
+                "Failed to extract plan data from plan source in MANIFEST, bash process exited with code: {}",
+                output.status,
+            )
+            .with_section(move || stdout.header("stdout: "))
+            .with_section(move || stderr.header("stderr: ")))
+        }
+    }
+    /// Search for an executable with the given name.
+    /// This function only returns a result if the found executable
+    /// has the executable permission set.
+    pub fn search_runtime_executable(
+        &self,
+        executable_name: impl AsRef<Path>,
+    ) -> Option<ExecutableMetadata<'_>> {
+        for path in self.runtime_path.iter() {
+            let executable_path = path.join(executable_name.as_ref());
+
+            if let Some(metadata) = self.elfs.get(&executable_path) {
+                if metadata.is_executable {
+                    return Some(ExecutableMetadata::Elf(metadata));
+                }
+            }
+            if let Some(metadata) = self.scripts.get(&executable_path) {
+                if metadata.is_executable {
+                    return Some(ExecutableMetadata::Script(metadata));
+                }
+            }
+        }
+        None
+    }
+
+    /// Search for an executable with the given name.
+    /// This function returns a result regardless of it's
+    /// executable permission bit.
+    pub fn search_runtime(
+        &self,
+        executable_name: impl AsRef<Path>,
+    ) -> Option<ExecutableMetadata<'_>> {
+        for path in self.runtime_path.iter() {
+            let executable_path = path.join(executable_name.as_ref());
+            if let Some(metadata) = self.elfs.get(&executable_path) {
+                return Some(ExecutableMetadata::Elf(metadata));
+            }
+            if let Some(metadata) = self.scripts.get(&executable_path) {
+                return Some(ExecutableMetadata::Script(metadata));
+            }
+        }
+        None
+    }
+
+    pub fn resolve_path(
+        &self,
+        tdeps: &HashMap<PackageIdent, ArtifactContext>,
+        path: impl AsRef<Path>,
+    ) -> PathBuf {
+        let mut resolved_path = path.as_ref().to_path_buf();
+        let mut current_artifact =
+            if let Some(next_artifact_ctx) = resolved_path.package_ident(self.target) {
+                tdeps.get(&next_artifact_ctx)
+            } else {
+                None
+            };
+        while let Some(artifact_ctx) = current_artifact {
+            if let Some(link) = artifact_ctx.links.get(resolved_path.as_path()) {
+                let link = if link.is_absolute() {
+                    link.to_path_buf()
+                } else {
+                    resolved_path
+                        .parent()
+                        .unwrap()
+                        .join(link)
+                        .absolutize()
+                        .unwrap()
+                        .to_path_buf()
+                };
+                if let Some(next_artifact_ctx) = link.package_ident(artifact_ctx.target) {
+                    if next_artifact_ctx == artifact_ctx.id
+                        && artifact_ctx.links.get(&link).is_none()
+                    {
+                        resolved_path = link.to_path_buf();
+                        current_artifact = None;
+                    } else {
+                        current_artifact = tdeps.get(&next_artifact_ctx);
+                        resolved_path = link.to_path_buf();
+                    }
+                }
+            } else {
+                let mut current_parent = resolved_path.parent();
+                let mut is_in_symlinked_dir = false;
+                while let Some(parent) = current_parent {
+                    if let Some(parent_link) = artifact_ctx.links.get(parent) {
+                        let parent_link = if parent_link.is_absolute() {
+                            parent_link.to_path_buf()
+                        } else {
+                            parent
+                                .parent()
+                                .unwrap()
+                                .join(parent_link)
+                                .absolutize()
+                                .unwrap()
+                                .to_path_buf()
+                        };
+                        resolved_path =
+                            parent_link.join(resolved_path.strip_prefix(parent).unwrap());
+                        is_in_symlinked_dir = true;
+                        break;
+                    } else {
+                        current_parent = parent.parent()
+                    }
+                }
+                if is_in_symlinked_dir {
+                    if let Some(next_artifact_ctx) =
+                        resolved_path.package_ident(artifact_ctx.target)
+                    {
+                        current_artifact = tdeps.get(&next_artifact_ctx);
+                    } else {
+                        current_artifact = None;
+                    }
+                } else {
+                    current_artifact = None;
+                }
+            }
+        }
+        resolved_path
+    }
+}
+
+pub(crate) enum ExecutableMetadata<'a> {
+    Elf(&'a ElfMetadata),
+    Script(&'a ScriptMetadata),
+}
+
+pub(crate) struct ArtifactIndexer<'a> {
+    store: &'a Store,
+    sender: Sender<ArtifactContext>,
+}
+
+impl<'a> ParallelVisitor for ArtifactIndexer<'a> {
+    fn visit(
+        &mut self,
+        entry: std::result::Result<ignore::DirEntry, ignore::Error>,
+    ) -> ignore::WalkState {
+        if let Ok(entry) = entry {
+            if let Some("hart") = entry.path().extension().and_then(OsStr::to_str) {
+                let hash = Blake3::from_path(entry.path()).unwrap_or_else(|_| {
+                    panic!(
+                        "Failed to generate hash for artifact {}",
+                        entry.path().display()
+                    )
+                });
+                if let Some(artifact_ctx) = self
+                    .store
+                    .get_connection()
+                    .expect("Failed to open connection to hab-auto-build sqlite database")
+                    .transaction(|connection| store::artifact_context_get(connection, &hash))
+                    .expect("Failed to read artifact context from hab-auto-build sqlite database")
+                {
+                    debug!("Artifact {} loaded from cache", artifact_ctx.id);
+                    self.sender
+                        .send(artifact_ctx)
+                        .expect("Failed to send artifact context to parent thread");
+                } else {
+                    match ArtifactContext::read_from_disk(entry.path(), Some(&hash)) {
+                        Ok(artifact_ctx) => {
+                            debug!(
+                                "Artifact {} loaded from {}",
+                                artifact_ctx.id,
+                                entry.path().display()
+                            );
+                            self.sender
+                                .send(artifact_ctx)
+                                .expect("Failed to send artifact context to parent thread");
+                        }
+                        Err(err) => {
+                            error!(
+                                "Failed to read contents of package artifact '{}': {}",
+                                entry.path().display(),
+                                err
+                            );
+                        }
+                    }
+                }
+            } else {
+                return WalkState::Continue;
+            }
+        }
+        WalkState::Continue
     }
 }
 

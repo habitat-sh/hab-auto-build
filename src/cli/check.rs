@@ -1,16 +1,16 @@
 use clap::Args;
-use color_eyre::{
-    eyre::{eyre, Context, Result},
-    owo_colors::OwoColorize,
+use color_eyre::eyre::{eyre, Context, Result};
+use owo_colors::OwoColorize;
+use std::{env, fmt::Write, path::PathBuf};
+use tracing::{error, info};
+
+use crate::{
+    check::{LeveledArtifactCheckViolation, LeveledSourceCheckViolation, ViolationLevel},
+    core::{
+        AutoBuildConfig, AutoBuildContext, BuildPlan, PackageDepGlob,
+        PackageTarget, PlanCheckStatus,
+    },
 };
-
-use std::{env, path::PathBuf};
-use tracing::{error, info, warn};
-
-use crate::{core::{
-    AutoBuildConfig, AutoBuildContext, BuildDryRun, CheckStatus, PackageDepGlob, PackageDepIdent,
-    PackageTarget,
-}, check::ViolationLevel};
 
 use super::OutputFormat;
 
@@ -22,6 +22,9 @@ pub(crate) struct Params {
     /// Output format
     #[arg(value_enum, short = 'f', long, default_value_t = OutputFormat::Plain, requires = "dry_run")]
     format: OutputFormat,
+    /// Only diplay the number of issues with each package
+    #[arg(short, long)]
+    summary: bool,
     /// List of packages to check
     packages: Vec<PackageDepGlob>,
 }
@@ -37,35 +40,116 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     let run_context = AutoBuildContext::new(&config, &config_path)
         .with_context(|| eyre!("Failed to initialize run"))?;
 
-    let packages = run_context.glob_deps(&args.packages, PackageTarget::default())?;
-    for package in packages {
-        match run_context.check(&package) {
-            Ok(check_statuses) => {
-                for check_status in check_statuses {
-                    match check_status {
-                        CheckStatus::CheckSucceeded(package, _, artifact_violations) => {
-                            let error_count = artifact_violations.iter().filter(|v| v.level == ViolationLevel::Error).count();
-                            let warning_count = artifact_violations.iter().filter(|v| v.level == ViolationLevel::Warn).count();
-                            info!(target: "user-log", "Checked package {}: {} errors, {} warnings", package, error_count, warning_count);
-                        }
-                        CheckStatus::ArtifactNotFound(package) => {
-                            warn!(target: "user-log", "No artifact found for package {}", package)
-                        }
-                    }
+    let package_indices = run_context.glob_deps(&args.packages, PackageTarget::default())?;
+    if package_indices.is_empty() && !run_context.is_empty() && !args.packages.is_empty() {
+        error!(target: "user-log",
+            "No packages found matching patterns: {}",
+            serde_json::to_string(&args.packages).unwrap()
+        );
+        return Ok(());
+    }
+    for package_index in package_indices {
+        let package = run_context.dep(package_index);
+        match run_context.package_check(package_index) {
+            Ok(check_status) => match check_status {
+                PlanCheckStatus::CheckSucceeded(source_violations, artifact_violations) => {
+                    output_violations(
+                        &source_violations,
+                        &artifact_violations,
+                        format!("{:?}", package).as_str(),
+                        true,
+                        args.summary,
+                    )?;
                 }
-            }
+                PlanCheckStatus::ArtifactNotFound => {
+                    info!(target: "user-ui", "{}: {:?}: No artifact found","warning".bold().yellow(), package.red())
+                }
+            },
             Err(err) => {
-                error!(target: "user-log", "Failed to check package {}: {}", package, err)
+                info!(target: "user-ui", "{}: Failed to check package {:?}: {:#}","error".bold().red(), package, err)
             }
         };
     }
     Ok(())
 }
 
-fn output_plain(dry_run: BuildDryRun) -> Result<()> {
+pub(crate) fn output_violations(
+    source_violations: &[LeveledSourceCheckViolation],
+    artifact_violations: &[LeveledArtifactCheckViolation],
+    package: &str,
+    header: bool,
+    summary: bool,
+) -> Result<()> {
+    let source_error_count = source_violations
+        .iter()
+        .filter(|v| v.level == ViolationLevel::Error)
+        .count();
+    let source_warning_count = source_violations
+        .iter()
+        .filter(|v| v.level == ViolationLevel::Warn)
+        .count();
+    let artifact_error_count = artifact_violations
+        .iter()
+        .filter(|v| v.level == ViolationLevel::Error)
+        .count();
+    let artifact_warning_count = artifact_violations
+        .iter()
+        .filter(|v| v.level == ViolationLevel::Warn)
+        .count();
+    if header {
+        let mut header = String::new();
+        write!(header, "{}:", package.white())?;
+        if artifact_error_count + source_error_count != 0 {
+            write!(
+                &mut header,
+                " {}",
+                format!("{} errors", artifact_error_count + source_error_count)
+                    .red()
+                    .bold()
+            )?;
+        }
+        if artifact_warning_count + source_warning_count != 0 {
+            write!(
+                &mut header,
+                " {}",
+                format!("{} warnings", artifact_warning_count + source_warning_count)
+                    .yellow()
+                    .bold()
+            )?;
+        }
+        if artifact_error_count + artifact_warning_count + source_error_count + source_warning_count
+            != 0
+        {
+        } else {
+            write!(
+                &mut header,
+                "{}",
+                format!(" all checks passed").green().bold()
+            )?;
+        }
+        info!(target: "user-ui", "{}", header);
+    }
+    if !summary {
+        for violation in source_violations {
+            if violation.level == ViolationLevel::Off {
+                continue;
+            }
+            info!(target: "user-ui", "     {}", violation);
+        }
+        for violation in artifact_violations {
+            if violation.level == ViolationLevel::Off {
+                continue;
+            }
+            info!(target: "user-ui", "     {}", violation);
+        }
+    }
+    Ok(())
+}
+
+fn output_plain(_dry_run: BuildPlan) -> Result<()> {
     todo!()
 }
 
-fn output_json(_dry_run: BuildDryRun) -> Result<()> {
+fn output_json(_dry_run: BuildPlan) -> Result<()> {
     todo!()
 }

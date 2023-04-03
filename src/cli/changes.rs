@@ -2,15 +2,13 @@ use std::{env, path::PathBuf};
 
 use chrono_humanize::{Accuracy, HumanTime};
 use clap::{arg, Args};
-use color_eyre::{
-    eyre::{eyre, Context, Result},
-    owo_colors::OwoColorize,
-};
-use tracing::info;
+use color_eyre::eyre::{eyre, Context, Result};
+use owo_colors::OwoColorize;
+use tracing::{error, info};
 
 use crate::core::{
-    AutoBuildConfig, AutoBuildContext, DependencyChangeCause, PackageDepIdent,
-    RepoChanges,
+    AutoBuildConfig, AutoBuildContext, DependencyChangeCause, PackageDepGlob,
+    PackageTarget, RepoChanges,
 };
 
 use super::OutputFormat;
@@ -27,7 +25,7 @@ pub(crate) struct Params {
     #[arg(short = 'e', long, default_value_t = false)]
     explain: bool,
     /// List of packages to check for changes
-    packages: Option<Vec<PackageDepIdent>>,
+    packages: Option<Vec<PackageDepGlob>>,
 }
 
 pub(crate) fn execute(args: Params) -> Result<()> {
@@ -41,25 +39,19 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     let run_context = AutoBuildContext::new(&config, &config_path)
         .with_context(|| eyre!("Failed to initialize run"))?;
 
-    let mut changes = run_context.changes();
-
-    if let Some(package_idents) = args.packages {
-        changes = changes
-            .into_iter()
-            .map(|mut repo_changes| {
-                repo_changes.changes.retain(|change| {
-                    package_idents.iter().any(|package_ident| {
-                        change
-                            .plan_ctx
-                            .id
-                            .as_ref()
-                            .satisfies_dependency(package_ident)
-                    })
-                });
-                repo_changes
-            })
-            .collect();
+    let packages = &args
+        .packages
+        .clone()
+        .unwrap_or(vec![PackageDepGlob::parse("*/*").unwrap()]);
+    let package_indices = run_context.glob_deps(&packages, PackageTarget::default())?;
+    if package_indices.is_empty() && !run_context.is_empty() {
+        error!(target: "user-log",
+            "No packages found matching patterns: {}",
+            serde_json::to_string(&args.packages).unwrap()
+        );
+        return Ok(());
     }
+    let changes = run_context.changes(&package_indices);
 
     match args.format {
         OutputFormat::Plain => output_plain(changes, args.explain)?,

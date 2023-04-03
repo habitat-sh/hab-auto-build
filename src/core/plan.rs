@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt::Display,
+    fmt::{Display, Write as FmtWrite},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -13,23 +13,25 @@ use color_eyre::{
     Help, SectionExt,
 };
 use diesel::{
-    r2d2::{ConnectionManager, PooledConnection},
-    Connection, SqliteConnection,
+    SqliteConnection,
 };
 use ignore::{ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
+
 use lazy_static::lazy_static;
+use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error};
+
+use tracing::{debug, error, info};
 
 use crate::{
     check::ContextRules,
-    store::{self, ModificationIndex, Store},
+    store::{self, ModificationIndex},
 };
 
 use super::{
-    ArtifactCache, ArtifactContext, PackageBuildIdent, PackageDepIdent, PackageIdent, PackageName,
-    PackageOrigin, PackageResolvedDepIdent, PackageResolvedVersion, PackageSource, PackageTarget,
-    RepoContext, RepoContextID,
+    ArtifactCache, ArtifactContext, PackageBuildIdent, PackageBuildVersion, PackageDepIdent,
+    PackageIdent, PackageName, PackageOrigin, PackageResolvedDepIdent,
+    PackageSource, PackageTarget, RepoContext, RepoContextID,
 };
 
 lazy_static! {
@@ -82,7 +84,7 @@ lazy_static! {
     .collect();
 }
 const PLAN_DATA_EXTRACT_SCRIPT: &[u8] = include_bytes!("../scripts/plan_data_extract.sh");
-const PACKAGE_CONFIG_FILE: &str = ".hab-plan-config.json";
+const PLAN_CONFIG_FILE: &str = ".hab-plan-config.toml";
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
 pub(crate) struct PlanContextPath(PathBuf);
@@ -116,7 +118,7 @@ pub(crate) struct PlanFilePath(PathBuf);
 
 impl PlanFilePath {
     pub fn context_rules_path(&self) -> PathBuf {
-        self.0.parent().unwrap().join(PACKAGE_CONFIG_FILE)
+        self.0.parent().unwrap().join(PLAN_CONFIG_FILE)
     }
 }
 
@@ -130,7 +132,7 @@ impl AsRef<Path> for PlanFilePath {
 pub(crate) struct RawPlanData {
     pub origin: PackageOrigin,
     pub name: PackageName,
-    pub version: PackageResolvedVersion,
+    pub version: PackageBuildVersion,
     pub source: Option<PackageSource>,
     pub licenses: Vec<String>,
     pub deps: Vec<PackageDepIdent>,
@@ -212,18 +214,21 @@ impl PlanContext {
         modification_index: Option<&ModificationIndex>,
         repo_ctx: &RepoContext,
         artifact_cache: &ArtifactCache,
-        plan_ctx_path: PlanContextPath,
-        plan_target_ctx_path: PlanTargetContextPath,
-        plan_path: PlanFilePath,
+        plan_ctx_path: &PlanContextPath,
+        plan_target_ctx_path: &PlanTargetContextPath,
+        plan_path: &PlanFilePath,
         target: PackageTarget,
     ) -> Result<PlanContext> {
         let mut child =  Command::new("bash")
             .arg("-s")
             .arg("-")
             .arg(plan_path.as_ref())
+            .arg(plan_ctx_path.as_ref())
+            .arg(plan_target_ctx_path.as_ref())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .current_dir(plan_target_ctx_path.as_ref())
             .spawn()
             .context("Failed to execute bash shell")
             .with_suggestion(|| "Make sure you have bash installed on your system, and that it's location is included in your PATH")?;
@@ -259,13 +264,19 @@ impl PlanContext {
             let rules = if let Ok(mut file) = std::fs::File::open(rules_path.as_path()) {
                 let mut data = String::new();
                 file.read_to_string(&mut data)?;
-                let plan_rules = serde_json::from_str(data.as_str())
-                    .with_context(|| {
-                        format!("Failed to read rules from '{}'", rules_path.display())
+                match ContextRules::from_str(data.as_str())
+                    .with_section(move || {
+                        data.header(format!("{}:", "File Contents".bright_cyan()))
                     })
-                    .with_section(move || data.header("rules: \n"))
-                    .with_suggestion(|| "Ensure your .hab-rules.json file contains valid rules")?;
-                Some(plan_rules)
+                    .with_suggestion(|| {
+                        "Ensure your .hab-plan-config.toml file contains valid rules"
+                    }) {
+                    Ok(plan_rules) => Some(plan_rules),
+                    Err(err) => {
+                        info!(target: "user-ui", "{} Failed to read plan config from {}: {:?}", "error:".bold().red(), rules_path.strip_prefix(repo_ctx.path.as_ref()).unwrap().display(), err);
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -274,12 +285,12 @@ impl PlanContext {
                 id,
                 repo_id: repo_ctx.id.clone(),
                 is_native: repo_ctx.is_native_plan(&plan_ctx_path),
-                context_path: plan_ctx_path,
+                context_path: plan_ctx_path.clone(),
                 target_context_last_modified_at: DateTime::<Utc>::from(
                     plan_target_ctx_path.as_ref().metadata()?.modified()?,
                 ),
-                target_context_path: plan_target_ctx_path,
-                plan_path,
+                target_context_path: plan_target_ctx_path.clone(),
+                plan_path: plan_path.clone(),
                 source: raw_data.source,
                 licenses: raw_data.licenses,
                 deps: raw_data
@@ -318,6 +329,7 @@ impl PlanContext {
     ) -> Result<()> {
         let plan_ctx_walker = WalkBuilder::new(self.context_path.as_ref())
             .standard_filters(false)
+            .sort_by_file_path(|a, b| a.cmp(b))
             .build();
         self.files_changed = Vec::new();
         self.latest_artifact = artifact_ctx.map(|artifact_ctx| PlanContextLatestArtifact {
@@ -325,26 +337,33 @@ impl PlanContext {
             ident: artifact_ctx.id.clone(),
         });
         // Is the plan a top level plan in the same folder as the plan context?
-        let is_top_level_plan = self.target_context_path.as_ref() == self.context_path.as_ref();
+        let is_in_top_level_dir = self.target_context_path.as_ref() == self.context_path.as_ref();
 
         for entry in plan_ctx_walker {
             match entry {
                 Ok(entry) => {
                     // Is this inside the plan's target folder
-                    let is_target_folder = entry
+                    let is_in_target_dir = entry
                         .path()
                         .strip_prefix(self.target_context_path.as_ref())
                         .is_ok();
                     // Is this inside a habitat or platform folder ?
-                    let is_habitat_folder = entry
+                    let is_in_habitat_dir = entry
                         .path()
                         .strip_prefix(self.context_path.as_ref())
                         .ok()
                         .and_then(|p| p.components().next())
                         .and_then(|p| p.as_os_str().to_str())
                         .map_or(false, |p| p == "habitat" || PackageTarget::parse(p).is_ok());
-
-                    if !is_target_folder && is_habitat_folder && !is_top_level_plan {
+                    let is_plan_config = if let Some(file_name) = entry.path().file_name() {
+                        file_name == PLAN_CONFIG_FILE
+                    } else {
+                        false
+                    };
+                    if !is_in_top_level_dir && is_in_habitat_dir && !is_in_target_dir {
+                        continue;
+                    }
+                    if is_in_target_dir && is_plan_config {
                         continue;
                     }
 
@@ -453,21 +472,25 @@ impl<'a> ParallelVisitor for PlanScanner<'a> {
                     if repo_ctx.is_ignored_plan(&plan_ctx_path) {
                         continue;
                     }
-                    let plan_data = PlanContext::read_from_disk(
+                    match PlanContext::read_from_disk(
                         None,
                         Some(self.modification_index),
                         repo_ctx,
                         self.artifact_cache,
-                        plan_ctx_path,
-                        plan_target_ctx_path,
-                        plan_path,
+                        &plan_ctx_path,
+                        &plan_target_ctx_path,
+                        &plan_path,
                         plan_target.to_owned(),
-                    )
-                    .expect("Failed to read PlanContext from disk");
-
-                    self.sender
-                        .send(plan_data)
-                        .expect("Failed to send PlanContext to parent thread");
+                    ) {
+                        Ok(plan_ctx) => {
+                            self.sender
+                                .send(plan_ctx)
+                                .expect("Failed to send PlanContext to parent thread");
+                        }
+                        Err(err) => {
+                            info!(target: "user-ui", "{} Failed to extract plan metadata from {}: {:?}", "error:".bold().red(), plan_path.as_ref().strip_prefix(repo_ctx.path.as_ref()).unwrap().display(), err);
+                        }
+                    };
                 }
             }
             if is_plan_ctx {

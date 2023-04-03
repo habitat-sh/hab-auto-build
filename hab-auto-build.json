@@ -1,0 +1,15 @@
+{
+    "repos": [{
+        "id": "core",
+        "source": "../bootstrap-plans",
+        "native_packages": [
+            "packages/bootstrap/build-tools/cross-compiler/**",
+            "packages/bootstrap/build-tools/host-tools/**",
+            "packages/bootstrap/build-tools/cross-tools/**"
+        ],
+        "ignored_packages": [
+            "draft/**"
+
+        ]
+    }]
+}

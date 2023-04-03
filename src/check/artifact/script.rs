@@ -1,8 +1,8 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, fmt::Display, path::PathBuf};
 
 use path_absolutize::Absolutize;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::{
     check::{
@@ -29,6 +29,19 @@ pub(crate) enum ScriptRule {
     MissingScriptInterpreterDependency(MissingScriptInterpreterDependency),
 }
 
+impl Display for ScriptRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScriptRule::HostScriptInterpreter(rule) => write!(f, "{}", rule),
+            ScriptRule::MissingEnvScriptInterpreter(rule) => write!(f, "{}", rule),
+            ScriptRule::EnvScriptInterpreterNotFound(rule) => write!(f, "{}", rule),
+            ScriptRule::ScriptInterpreterNotFound(rule) => write!(f, "{}", rule),
+            ScriptRule::UnlistedScriptInterpreter(rule) => write!(f, "{}", rule),
+            ScriptRule::MissingScriptInterpreterDependency(rule) => write!(f, "{}", rule),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "id", content = "options")]
 pub(crate) enum ScriptRuleOptions {
@@ -52,6 +65,17 @@ pub(crate) struct HostScriptInterpreter {
     pub interpreter: PathBuf,
 }
 
+impl Display for HostScriptInterpreter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The interpreter {} does not belong to a habitat package",
+            self.source.relative_package_path().unwrap().display(),
+            self.interpreter.display()
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct HostScriptInterpreterOptions {
     pub level: ViolationLevel,
@@ -71,6 +95,17 @@ pub(crate) struct MissingEnvScriptInterpreter {
     pub raw_interpreter: String,
 }
 
+impl Display for MissingEnvScriptInterpreter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The 'env' command must have atleast 1 argument, found '{}'",
+            self.source.relative_package_path().unwrap().display(),
+            self.raw_interpreter
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingEnvScriptInterpreterOptions {
     pub level: ViolationLevel,
@@ -88,6 +123,17 @@ impl Default for MissingEnvScriptInterpreterOptions {
 pub(crate) struct EnvScriptInterpreterNotFound {
     pub source: PathBuf,
     pub interpreter: PathBuf,
+}
+
+impl Display for EnvScriptInterpreterNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The interpreter command '{}' could not be found in the runtime environment",
+            self.source.relative_package_path().unwrap().display(),
+            self.interpreter.display()
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -110,6 +156,18 @@ pub(crate) struct ScriptInterpreterNotFound {
     pub interpreter_dependency: PackageIdent,
 }
 
+impl Display for ScriptInterpreterNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The interpreter command '{}' could not be found in {}",
+            self.source.relative_package_path().unwrap().display(),
+            self.interpreter.display(),
+            self.interpreter_dependency
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ScriptInterpreterNotFoundOptions {
     pub level: ViolationLevel,
@@ -128,6 +186,18 @@ pub(crate) struct MissingScriptInterpreterDependency {
     pub source: PathBuf,
     pub interpreter: PathBuf,
     pub interpreter_dependency: PackageIdent,
+}
+
+impl Display for MissingScriptInterpreterDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The interpreter command '{}' belongs to {} which is not a runtime dependency of this package",
+            self.source.relative_package_path().unwrap().display(),
+            self.interpreter.display(),
+            self.interpreter_dependency
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -149,6 +219,29 @@ pub(crate) struct UnlistedScriptInterpreter {
     pub interpreter: PathBuf,
     pub interpreter_dependency: PackageIdent,
     pub listed_interpreters: Vec<PathBuf>,
+}
+
+impl Display for UnlistedScriptInterpreter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.listed_interpreters.is_empty() {
+            write!(
+                f,
+                "{}: The interpreter command '{}' is not listed as an interpreter in {}",
+                self.source.relative_package_path().unwrap().display(),
+                self.interpreter.display(),
+                self.interpreter_dependency
+            )
+        } else {
+            write!(
+                f,
+                "{}: The interpreter command '{}' is not listed as an interpreter in {}, available interpreters are: {:?}",
+                self.source.relative_package_path().unwrap().display(),
+                self.interpreter.display(),
+                self.interpreter_dependency,
+                self.listed_interpreters
+            )
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -174,7 +267,7 @@ impl Default for ScriptCheck {
     fn default() -> Self {
         Self {
             env_interpreters: vec![String::from("env")],
-            platform_interpreter_paths: vec![PathBuf::from("/bin/sh")],
+            platform_interpreter_paths: vec![PathBuf::from("/bin/sh"), PathBuf::from("/bin/false")],
         }
     }
 }
@@ -184,11 +277,11 @@ impl ArtifactCheck for ScriptCheck {
         &self,
         rules: &ContextRules,
         checker_context: &mut CheckerContext,
-        artifact_cache: &ArtifactCache,
+        _artifact_cache: &ArtifactCache,
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
         let mut violations = vec![];
-
+        let mut used_deps = HashSet::new();
         let host_script_interpreter_options = rules
             .artifact_rules
             .iter()
@@ -294,10 +387,17 @@ impl ArtifactCheck for ScriptCheck {
             let command = if metadata.interpreter.command.is_absolute() {
                 metadata.interpreter.command.clone()
             } else {
-                path.join(metadata.interpreter.command.as_path())
-                    .absolutize()
-                    .unwrap()
-                    .to_path_buf()
+                if let Some(value) = path.parent().map(|p| {
+                    p.join(metadata.interpreter.command.as_path())
+                        .absolutize()
+                        .unwrap()
+                        .to_path_buf()
+                }) {
+                    value
+                } else {
+                    error!(target: "user-ui", "Could not determine interpreter for {} from header: {}", path.display(), metadata.interpreter.raw);
+                    continue;
+                }
             };
             // Resolves the path if it is a symlink
             debug!(
@@ -319,6 +419,7 @@ impl ArtifactCheck for ScriptCheck {
                         false
                     };
                 if is_env_interpreter {
+                    used_deps.insert(interpreter_dep.clone());
                     // TODO: Handle case where command is symlinked
                     if let Some(command) = metadata.interpreter.args.first() {
                         let mut found = false;
@@ -330,6 +431,7 @@ impl ArtifactCheck for ScriptCheck {
                                 .is_some()
                             {
                                 found = true;
+                                used_deps.insert(runtime_artifact_ctx.id.clone());
                                 break;
                             }
                         }
@@ -361,6 +463,7 @@ impl ArtifactCheck for ScriptCheck {
                     }
                 } else if let Some(interpreter_artifact_ctx) = tdep_artifacts.get(&interpreter_dep)
                 {
+                    used_deps.insert(interpreter_artifact_ctx.id.clone());
                     if interpreter_artifact_ctx
                         .elfs
                         .get(command.as_path())
@@ -425,10 +528,12 @@ impl ArtifactCheck for ScriptCheck {
                 });
             }
         }
+        for used_dep in used_deps {
+            checker_context.mark_used(&used_dep);
+        }
 
         violations
             .into_iter()
-            .filter(|v| v.level != ViolationLevel::Off)
             .collect()
     }
 }

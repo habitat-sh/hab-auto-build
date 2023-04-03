@@ -111,7 +111,6 @@ impl FileKind {
     }
 }
 
-
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub(crate) struct FSRootPath(PathBuf);
 
@@ -121,13 +120,31 @@ impl Default for FSRootPath {
     }
 }
 
-impl From<PathBuf> for FSRootPath {
-    fn from(value: PathBuf) -> Self {
-        FSRootPath(value)
+impl From<HabitatStudioRootPath> for FSRootPath {
+    fn from(value: HabitatStudioRootPath) -> Self {
+        FSRootPath(value.0)
     }
 }
 
 impl AsRef<Path> for FSRootPath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct HabitatSourceCachePath(PathBuf);
+
+impl AsRef<Path> for HabitatSourceCachePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct HabitatStudioRootPath(PathBuf);
+
+impl AsRef<Path> for HabitatStudioRootPath {
     fn as_ref(&self) -> &Path {
         self.0.as_path()
     }
@@ -145,6 +162,12 @@ impl Default for HabitatRootPath {
 impl HabitatRootPath {
     pub fn new(fs_root_path: FSRootPath) -> HabitatRootPath {
         HabitatRootPath(fs_root_path.as_ref().join("hab"))
+    }
+    pub fn studio_root(&self, studio_name: &str) -> HabitatStudioRootPath {
+        HabitatStudioRootPath(self.0.join("studios").join(studio_name))
+    }
+    pub fn source_cache(&self) -> HabitatSourceCachePath {
+        HabitatSourceCachePath(self.0.join("cache").join("src"))
     }
 }
 

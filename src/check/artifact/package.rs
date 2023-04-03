@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    ffi::OsString,
+    fmt::Display,
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +30,25 @@ pub(crate) enum PackageRule {
     EmptyTopLevelDirectory(EmptyTopLevelDirectory),
     #[serde(rename = "broken-link")]
     BrokenLink(BrokenLink),
+    #[serde(rename = "unused-dependency")]
+    UnusedDependency(UnusedDependency),
+    #[serde(rename = "duplicate-runtime-binary")]
+    DuplicateRuntimeBinary(DuplicateRuntimeBinary),
+}
+
+impl Display for PackageRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PackageRule::BadRuntimePathEntry(rule) => write!(f, "{}", rule),
+            PackageRule::MissingRuntimePathEntryDependency(rule) => write!(f, "{}", rule),
+            PackageRule::MissingDependencyArtifact(rule) => write!(f, "{}", rule),
+            PackageRule::DuplicateDependency(rule) => write!(f, "{}", rule),
+            PackageRule::EmptyTopLevelDirectory(rule) => write!(f, "{}", rule),
+            PackageRule::BrokenLink(rule) => write!(f, "{}", rule),
+            PackageRule::UnusedDependency(rule) => write!(f, "{}", rule),
+            PackageRule::DuplicateRuntimeBinary(rule) => write!(f, "{}", rule),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -42,11 +66,25 @@ pub(crate) enum PackageRuleOptions {
     EmptyTopLevelDirectory(EmptyTopLevelDirectoryOptions),
     #[serde(rename = "broken-link")]
     BrokenLink(BrokenLinkOptions),
+    #[serde(rename = "unused-dependency")]
+    UnusedDependency(UnusedDependencyOptions),
+    #[serde(rename = "duplicate-runtime-binary")]
+    DuplicateRuntimeBinary(DuplicateRuntimeBinaryOptions),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct BadRuntimePathEntry {
     pub entry: PathBuf,
+}
+
+impl Display for BadRuntimePathEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The runtime path entry {} does not belong to a habitat package",
+            self.entry.display()
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -68,6 +106,12 @@ pub(crate) struct MissingRuntimePathEntryDependency {
     pub dep_ident: PackageIdent,
 }
 
+impl Display for MissingRuntimePathEntryDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "The runtime path entry {} belongs to {} which is not a runtime dependency of this package", self.entry.display(), self.dep_ident)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingRuntimePathEntryDependencyOptions {
     pub level: ViolationLevel,
@@ -84,6 +128,16 @@ impl Default for MissingRuntimePathEntryDependencyOptions {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MissingDependencyArtifact {
     pub dep_ident: PackageIdent,
+}
+
+impl Display for MissingDependencyArtifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Could not find an artifact for {} required by this package",
+            self.dep_ident
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -104,6 +158,16 @@ pub(crate) struct DuplicateDependency {
     pub dep_ident: PackageIdent,
 }
 
+impl Display for DuplicateDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The package {} is specified as both a 'dep' and 'build_dep' for this package",
+            self.dep_ident
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct DuplicateDependencyOptions {
     pub level: ViolationLevel,
@@ -120,6 +184,16 @@ impl Default for DuplicateDependencyOptions {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct EmptyTopLevelDirectory {
     pub directory: PathBuf,
+}
+
+impl Display for EmptyTopLevelDirectory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The top level directory {} does not contain any files",
+            self.directory.display()
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -141,6 +215,17 @@ pub(crate) struct BrokenLink {
     pub link: PathBuf,
 }
 
+impl Display for BrokenLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The symlink points to {} which does not exist",
+            self.entry.relative_package_path().unwrap().display(),
+            self.link.display()
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct BrokenLinkOptions {
     pub level: ViolationLevel,
@@ -154,10 +239,69 @@ impl Default for BrokenLinkOptions {
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct PackageCheck {}
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct UnusedDependency {
+    pub dep_ident: PackageIdent,
+}
 
-impl ArtifactCheck for PackageCheck {
+impl Display for UnusedDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The package {} does not seem to be used at runtime",
+            self.dep_ident,
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct UnusedDependencyOptions {
+    pub level: ViolationLevel,
+}
+
+impl Default for UnusedDependencyOptions {
+    fn default() -> Self {
+        Self {
+            level: ViolationLevel::Warn,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DuplicateRuntimeBinary {
+    pub primary_binary: PathBuf,
+    pub duplicate_binary: PathBuf,
+}
+
+impl Display for DuplicateRuntimeBinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Duplicate binary {} available at {}, it was first found at {}",
+            self.primary_binary.file_name().unwrap().to_str().unwrap(),
+            self.primary_binary.display(),
+            self.duplicate_binary.display()
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct DuplicateRuntimeBinaryOptions {
+    pub level: ViolationLevel,
+}
+
+impl Default for DuplicateRuntimeBinaryOptions {
+    fn default() -> Self {
+        Self {
+            level: ViolationLevel::Warn,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PackageBeforeCheck {}
+
+impl ArtifactCheck for PackageBeforeCheck {
     fn artifact_context_check(
         &self,
         rules: &ContextRules,
@@ -166,7 +310,6 @@ impl ArtifactCheck for PackageCheck {
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
         let mut violations = vec![];
-
         let bad_runtime_path_entry_options = rules
             .artifact_rules
             .iter()
@@ -262,6 +405,22 @@ impl ArtifactCheck for PackageCheck {
             .last()
             .expect("Default rule missing");
 
+        let duplicate_runtime_binary_options = rules
+            .artifact_rules
+            .iter()
+            .filter_map(|rule| {
+                if let ArtifactRuleOptions::Package(PackageRuleOptions::DuplicateRuntimeBinary(
+                    options,
+                )) = &rule.options
+                {
+                    Some(options)
+                } else {
+                    None
+                }
+            })
+            .last()
+            .expect("Default rule missing");
+
         let duplicate_deps = artifact_context
             .deps
             .intersection(&artifact_context.build_deps);
@@ -322,13 +481,78 @@ impl ArtifactCheck for PackageCheck {
             })
             .chain(Some((artifact_context.id.clone(), artifact_context.clone())).into_iter()) // The artifact as it's own dependency
             .collect::<HashMap<PackageIdent, ArtifactContext>>();
+
+        let mut runtime_binaries: HashMap<OsString, PathBuf> = HashMap::new();
+
         let runtime_path = artifact_context
             .runtime_path
             .iter()
             .filter_map(|search_path| {
                 if let Some(dep_ident) = search_path.package_ident(artifact_context.target) {
                     if tdep_artifacts.get(&dep_ident).is_some() {
-                        artifact_cache.artifact(&dep_ident).cloned()
+                        let artifact_ctx = artifact_cache.artifact(&dep_ident).cloned();
+                        if let Some(artifact_ctx) = &artifact_ctx {
+                            for (elf_path, elf_metadata) in &artifact_ctx.elfs {
+                                if !elf_metadata.is_executable {
+                                    continue;
+                                }
+                                if elf_path.parent().unwrap() == search_path {
+                                    match runtime_binaries
+                                        .entry(elf_path.file_name().unwrap().to_os_string())
+                                    {
+                                        Entry::Occupied(entry) => {
+                                            if entry.get() != elf_path {
+                                                violations.push(LeveledArtifactCheckViolation {
+                                                    level: duplicate_runtime_binary_options.level,
+                                                    violation: ArtifactCheckViolation::Package(
+                                                        PackageRule::DuplicateRuntimeBinary(
+                                                            DuplicateRuntimeBinary {
+                                                                primary_binary: entry.get().clone(),
+                                                                duplicate_binary: elf_path.clone(),
+                                                            },
+                                                        ),
+                                                    ),
+                                                });
+                                            }
+                                        }
+                                        Entry::Vacant(entry) => {
+                                            entry.insert(elf_path.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            for (script_path, script_metadata) in &artifact_ctx.scripts {
+                                if !script_metadata.is_executable {
+                                    continue;
+                                }
+                                if script_path.parent().unwrap() == search_path {
+                                    match runtime_binaries
+                                        .entry(script_path.file_name().unwrap().to_os_string())
+                                    {
+                                        Entry::Occupied(entry) => {
+                                            if entry.get() != script_path {
+                                                violations.push(LeveledArtifactCheckViolation {
+                                                    level: duplicate_runtime_binary_options.level,
+                                                    violation: ArtifactCheckViolation::Package(
+                                                        PackageRule::DuplicateRuntimeBinary(
+                                                            DuplicateRuntimeBinary {
+                                                                primary_binary: entry.get().clone(),
+                                                                duplicate_binary: script_path
+                                                                    .clone(),
+                                                            },
+                                                        ),
+                                                    ),
+                                                });
+                                            }
+                                        }
+                                        Entry::Vacant(entry) => {
+                                            entry.insert(script_path.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        artifact_ctx
                     } else {
                         violations.push(LeveledArtifactCheckViolation {
                             level: missing_runtime_path_entry_dependency_options.level,
@@ -359,9 +583,49 @@ impl ArtifactCheck for PackageCheck {
         checker_context.tdeps = Some(tdep_artifacts);
         checker_context.runtime_artifacts = Some(runtime_path);
         checker_context.unused_deps = Some(artifact_context.deps.clone());
-        violations
-            .into_iter()
-            .filter(|v| v.level != ViolationLevel::Off)
-            .collect()
+        violations.into_iter().collect()
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PackageAfterCheck {}
+
+impl ArtifactCheck for PackageAfterCheck {
+    fn artifact_context_check(
+        &self,
+        rules: &ContextRules,
+        checker_context: &mut CheckerContext,
+        _artifact_cache: &ArtifactCache,
+        _artifact_context: &ArtifactContext,
+    ) -> Vec<LeveledArtifactCheckViolation> {
+        let mut violations = vec![];
+        let unused_dependency_options = rules
+            .artifact_rules
+            .iter()
+            .filter_map(|rule| {
+                if let ArtifactRuleOptions::Package(PackageRuleOptions::UnusedDependency(options)) =
+                    &rule.options
+                {
+                    Some(options)
+                } else {
+                    None
+                }
+            })
+            .last()
+            .expect("Default rule missing");
+        let unused_deps = checker_context.unused_deps.as_ref().unwrap();
+        if !unused_deps.is_empty() {
+            for unused_dep in unused_deps {
+                violations.push(LeveledArtifactCheckViolation {
+                    level: unused_dependency_options.level,
+                    violation: ArtifactCheckViolation::Package(PackageRule::UnusedDependency(
+                        UnusedDependency {
+                            dep_ident: unused_dep.clone(),
+                        },
+                    )),
+                })
+            }
+        }
+        violations.into_iter().collect()
     }
 }

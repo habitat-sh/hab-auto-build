@@ -10,7 +10,7 @@ mod package;
 mod plan;
 mod repo;
 mod source;
-
+pub mod habitat;
 
 pub use archive::*;
 pub use artifact::*;

@@ -1,5 +1,6 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, fmt::Display, path::PathBuf};
 
+use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -38,6 +39,24 @@ pub(crate) enum ElfRule {
     UnexpectedELFInterpreter(UnexpectedELFInterpreter),
 }
 
+impl Display for ElfRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ElfRule::MissingRPathEntryDependency(rule) => write!(f, "{}", rule),
+            ElfRule::BadRPathEntry(rule) => write!(f, "{}", rule),
+            ElfRule::MissingRunPathEntryDependency(rule) => write!(f, "{}", rule),
+            ElfRule::BadRunPathEntry(rule) => write!(f, "{}", rule),
+            ElfRule::LibraryDependencyNotFound(rule) => write!(f, "{}", rule),
+            ElfRule::BadLibraryDependency(rule) => write!(f, "{}", rule),
+            ElfRule::BadELFInterpreter(rule) => write!(f, "{}", rule),
+            ElfRule::HostELFInterpreter(rule) => write!(f, "{}", rule),
+            ElfRule::ELFInterpreterNotFound(rule) => write!(f, "{}", rule),
+            ElfRule::MissingELFInterpreterDependency(rule) => write!(f, "{}", rule),
+            ElfRule::UnexpectedELFInterpreter(rule) => write!(f, "{}", rule),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "id", content = "options")]
 pub(crate) enum ElfRuleOptions {
@@ -72,6 +91,12 @@ pub(crate) struct MissingRPathEntryDependency {
     pub dep_ident: PackageIdent,
 }
 
+impl Display for MissingRPathEntryDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: The rpath entry {} belongs to {} which is not a runtime dependency of this package", self.source.relative_package_path().unwrap().display().white(), self.entry.display().yellow(), self.dep_ident.yellow())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingRPathEntryDependencyOptions {
     pub level: ViolationLevel,
@@ -89,6 +114,21 @@ impl Default for MissingRPathEntryDependencyOptions {
 pub(crate) struct BadRPathEntry {
     pub source: PathBuf,
     pub entry: PathBuf,
+}
+
+impl Display for BadRPathEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The rpath entry {} does not belong to a habitat package",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.entry.display().yellow()
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -111,6 +151,12 @@ pub(crate) struct MissingRunPathEntryDependency {
     pub dep_ident: PackageIdent,
 }
 
+impl Display for MissingRunPathEntryDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: The runpath entry {} belongs to {} which is not a runtime dependency of this package", self.source.relative_package_path().unwrap().display().white(), self.entry.display().yellow(), self.dep_ident.yellow())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingRunPathEntryDependencyOptions {
     pub level: ViolationLevel,
@@ -130,6 +176,21 @@ pub(crate) struct BadRunPathEntry {
     pub entry: PathBuf,
 }
 
+impl Display for BadRunPathEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The runpath entry {} does not belong to a habitat package",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.entry.display().yellow()
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct BadRunPathEntryOptions {
     pub level: ViolationLevel,
@@ -147,6 +208,21 @@ impl Default for BadRunPathEntryOptions {
 pub(crate) struct LibraryDependencyNotFound {
     pub source: PathBuf,
     pub library: String,
+}
+
+impl Display for LibraryDependencyNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The library {} could not be found in any rpath / runpath directories",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.library.yellow()
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -170,6 +246,23 @@ pub(crate) struct BadLibraryDependency {
     pub elf_type: ElfType,
 }
 
+impl Display for BadLibraryDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The library {} at {} is a {}, it must be a shared library",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.library.yellow(),
+            self.library_path.display().yellow(),
+            self.elf_type
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct BadLibraryDependencyOptions {
     pub level: ViolationLevel,
@@ -186,6 +279,20 @@ impl Default for BadLibraryDependencyOptions {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MissingELFInterpreter {
     pub source: PathBuf,
+}
+
+impl Display for MissingELFInterpreter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The executable has no ELF interpreter",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white()
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -207,6 +314,21 @@ pub(crate) struct BadELFInterpreter {
     pub interpreter: PathBuf,
 }
 
+impl Display for BadELFInterpreter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The ELF interpreter {} is not valid",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.interpreter.display().yellow()
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct BadELFInterpreterOptions {
     pub level: ViolationLevel,
@@ -224,6 +346,21 @@ impl Default for BadELFInterpreterOptions {
 pub(crate) struct HostELFInterpreter {
     pub source: PathBuf,
     pub interpreter: PathBuf,
+}
+
+impl Display for HostELFInterpreter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The ELF interpreter {} does not belong to a habitat package",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.interpreter.display().yellow()
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -246,6 +383,22 @@ pub(crate) struct ELFInterpreterNotFound {
     pub interpreter_dependency: PackageIdent,
 }
 
+impl Display for ELFInterpreterNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The ELF interpreter {} could not be found in {}",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.interpreter.display().yellow(),
+            self.interpreter_dependency.yellow()
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ELFInterpreterNotFoundOptions {
     pub level: ViolationLevel,
@@ -266,6 +419,12 @@ pub(crate) struct MissingELFInterpreterDependency {
     pub interpreter_dependency: PackageIdent,
 }
 
+impl Display for MissingELFInterpreterDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: The ELF interpreter {} belongs to {} which is not a runtime dependency of this package", self.source.relative_package_path().unwrap().display().white(), self.interpreter.display().yellow(), self.interpreter_dependency.yellow())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingELFInterpreterDependencyOptions {
     pub level: ViolationLevel,
@@ -283,6 +442,12 @@ impl Default for MissingELFInterpreterDependencyOptions {
 pub(crate) struct UnexpectedELFInterpreter {
     pub source: PathBuf,
     pub interpreter: PathBuf,
+}
+
+impl Display for UnexpectedELFInterpreter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: The ELF shared-library should not have an interpreter set, but found interpreter {}", self.source.relative_package_path().unwrap().display().white(), self.interpreter.display().yellow())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -306,10 +471,11 @@ impl ArtifactCheck for ElfCheck {
         &self,
         rules: &ContextRules,
         checker_context: &mut CheckerContext,
-        artifact_cache: &ArtifactCache,
+        _artifact_cache: &ArtifactCache,
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
         let mut violations = vec![];
+        let mut used_deps = HashSet::new();
         let tdep_artifacts = checker_context
             .tdeps
             .as_ref()
@@ -539,6 +705,8 @@ impl ArtifactCheck for ElfCheck {
                                                         ),
                                                     ),
                                                 });
+                                            } else {
+                                                used_deps.insert(interpreter_dep.clone());
                                             }
                                         } else {
                                             violations.push(LeveledArtifactCheckViolation {
@@ -554,6 +722,8 @@ impl ArtifactCheck for ElfCheck {
                                                 ),
                                             });
                                         }
+                                    } else {
+                                        used_deps.insert(interpreter_dep);
                                     }
                                 } else {
                                     violations.push(LeveledArtifactCheckViolation {
@@ -645,12 +815,14 @@ impl ArtifactCheck for ElfCheck {
                                 match metadata.elf_type {
                                     ElfType::SharedLibrary | ElfType::Relocatable => {
                                         found = true;
+                                        used_deps.insert(artifact.id.clone());
                                         break;
                                     }
                                     ElfType::Executable
                                     | ElfType::PieExecutable
                                     | ElfType::Other => {
                                         found = true;
+                                        used_deps.insert(artifact.id.clone());
                                         violations.push(LeveledArtifactCheckViolation {
                                             level: bad_library_dependency_options.level,
                                             violation: ArtifactCheckViolation::Elf(
@@ -724,12 +896,14 @@ impl ArtifactCheck for ElfCheck {
                                 match metadata.elf_type {
                                     ElfType::SharedLibrary | ElfType::Relocatable => {
                                         found = true;
+                                        used_deps.insert(artifact.id.clone());
                                         break;
                                     }
                                     ElfType::Executable
                                     | ElfType::PieExecutable
                                     | ElfType::Other => {
                                         found = true;
+                                        used_deps.insert(artifact.id.clone());
                                         violations.push(LeveledArtifactCheckViolation {
                                             level: bad_library_dependency_options.level,
                                             violation: ArtifactCheckViolation::Elf(
@@ -787,9 +961,10 @@ impl ArtifactCheck for ElfCheck {
                 }
             }
         }
-        violations
-            .into_iter()
-            .filter(|v| v.level != ViolationLevel::Off)
-            .collect()
+        for used_dep in used_deps {
+            checker_context.mark_used(&used_dep);
+        }
+
+        violations.into_iter().collect()
     }
 }

@@ -1,11 +1,13 @@
 use std::{
+    collections::BTreeSet,
     fs::File,
     io::{BufReader, Read},
     path::{Path, PathBuf},
 };
 
+use askalono::{ScanMode, ScanStrategy, Store, TextData};
 use bzip2::read::BzDecoder;
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Context, Result};
 use flate2::bufread::GzDecoder;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use lazy_static::lazy_static;
@@ -14,12 +16,14 @@ use tar::Archive;
 use tracing::error;
 use xz2::bufread::XzDecoder;
 
-use super::FileKind;
+use super::{Blake3, FileKind};
 
 const LICENSE_GLOBS: &[&str] = &[
     // General
     "COPYING",
     "COPYING[.-]*",
+    "COPYING[0-9]",
+    "COPYING[0-9][.-]*",
     "COPYRIGHT",
     "COPYRIGHT[.-]*",
     "EULA",
@@ -39,21 +43,11 @@ const LICENSE_GLOBS: &[&str] = &[
     "agpl[.-]*",
     "gpl[.-]*",
     "lgpl[.-]*",
-    // Other license-specific (APACHE-2.0.txt, etc.)
-    "AGPL-*[0-9]*",
-    "APACHE-*[0-9]*",
-    "BSD-*[0-9]*",
-    "CC-BY-*",
-    "GFDL-*[0-9]*",
-    "GNU-*[0-9]*",
-    "GPL-*[0-9]*",
-    "LGPL-*[0-9]*",
-    "MIT-*[0-9]*",
-    "MPL-*[0-9]*",
-    "OFL-*[0-9]*",
 ];
+const LICENSE_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/license-cache.bin.gz"));
 
 lazy_static! {
+    static ref LICENSE_STORE: Store = Store::from_cache(LICENSE_DATA).unwrap();
     static ref LICENSE_GLOBSET: GlobSet = {
         let mut builder = GlobSetBuilder::new();
         // A GlobBuilder can be used to configure each glob's match semantics
@@ -65,6 +59,13 @@ lazy_static! {
                     .build().unwrap()
             );
         }
+        for license in LICENSE_STORE.licenses() {
+            builder.add(
+                GlobBuilder::new(format!("**/{}*", license).as_str())
+                    .literal_separator(true)
+                    .build().unwrap()
+            );
+        }
         builder.build().unwrap()
     };
 }
@@ -72,7 +73,8 @@ lazy_static! {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SourceContext {
     pub format: (FileKind, Option<FileKind>),
-    pub licenses: Vec<SourceLicenseContext>,
+    pub licenses: BTreeSet<SourceLicenseContext>,
+    pub license_files_hash: Blake3,
 }
 
 impl SourceContext {
@@ -80,7 +82,7 @@ impl SourceContext {
         let file_type = FileKind::detect_from_path(path.as_ref())?;
         let file = BufReader::new(File::open(path.as_ref())?);
         let format;
-        let mut licenses = Vec::new();
+        let mut licenses = BTreeSet::new();
         match file_type {
             FileKind::Tar => {
                 format = (file_type, None);
@@ -133,25 +135,51 @@ impl SourceContext {
             }
             FileKind::Elf | FileKind::Script | FileKind::Other => {
                 format = (file_type, None);
-                licenses = vec![];
+                licenses = BTreeSet::default();
             }
         }
 
-        Ok(SourceContext { format, licenses })
+        Ok(SourceContext {
+            format,
+            license_files_hash: Blake3::hash_value(&licenses)
+                .context("Failed to hash source context licenses")?,
+            licenses,
+        })
     }
 
-    pub fn read_licenses_from_archive<R>(mut tar: Archive<R>) -> Result<Vec<SourceLicenseContext>>
+    pub fn read_licenses_from_archive<R>(
+        mut tar: Archive<R>,
+    ) -> Result<BTreeSet<SourceLicenseContext>>
     where
         R: Read,
     {
-        let mut licenses = Vec::new();
+        let mut licenses = BTreeSet::new();
+        let strategy = ScanStrategy::new(&*LICENSE_STORE)
+            .confidence_threshold(0.8)
+            .mode(ScanMode::TopDown)
+            .max_passes(50)
+            .optimize(true);
         for entry in tar.entries()? {
             let mut entry = entry?;
             let path = entry.path()?.to_path_buf();
             if LICENSE_GLOBSET.is_match(path.as_path()) {
                 let mut text = String::new();
                 if entry.read_to_string(&mut text).is_ok() {
-                    licenses.push(SourceLicenseContext { path, text })
+                    if text.is_empty() {
+                        panic!("Empty");
+                    }
+                    let data = TextData::from(text.clone());
+                    let mut detected_licenses = BTreeSet::new();
+                    if let Ok(results) = strategy.scan(&data) {
+                        for item in results.containing {
+                            detected_licenses.insert(item.license.name.to_string());
+                        }
+                    }
+                    licenses.insert(SourceLicenseContext {
+                        path,
+                        text,
+                        detected_licenses,
+                    });
                 } else {
                     error!(target: "user-log", "Failed to read file {} in archive", path.display());
                 }
@@ -161,8 +189,9 @@ impl SourceContext {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SourceLicenseContext {
     pub path: PathBuf,
     pub text: String,
+    pub detected_licenses: BTreeSet<String>,
 }

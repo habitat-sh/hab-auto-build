@@ -1,10 +1,11 @@
 use crate::core::{BOOTSTRAP_BUILD_STUDIO_PACKAGE, STANDARD_BUILD_STUDIO_PACKAGE};
 
 use super::{
-    ArtifactCache, BuildStudioConfig, PackageBuildIdent, PackageDepGlob, PackageDepGlobMatcher,
-    PackageDepIdent, PackageIdent, PackageName, PackageOrigin, PackageRelease,
-    PackageResolvedDepIdent, PackageResolvedVersion, PackageTarget, PackageVersion, PlanContext,
-    PlanContextFileChange, PlanContextID, PlanContextLatestArtifact, PlanFilePath, RepoContextID,
+    ArtifactCache, BuildStudioConfig, PackageBuildIdent, PackageBuildVersion,
+    PackageDepGlobMatcher, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
+    PackageRelease, PackageResolvedDepIdent, PackageTarget, PackageVersion,
+    PlanContext, PlanContextFileChange, PlanContextID, PlanContextLatestArtifact, PlanFilePath,
+    RepoContextID,
 };
 
 use clap::ValueEnum;
@@ -13,7 +14,7 @@ use color_eyre::{
     Help, SectionExt,
 };
 use emoji_printer::print_emojis;
-use globset::{Glob, GlobMatcher};
+
 use petgraph::{
     algo::{self, greedy_feedback_arc_set},
     stable_graph::{NodeIndex, StableGraph},
@@ -71,10 +72,7 @@ type PackageVersionList = HashMap<
     PackageOrigin,
     HashMap<
         PackageName,
-        HashMap<
-            PackageTarget,
-            BTreeMap<PackageResolvedVersion, BTreeMap<PackageRelease, NodeIndex>>,
-        >,
+        HashMap<PackageTarget, BTreeMap<PackageBuildVersion, BTreeMap<PackageRelease, NodeIndex>>>,
     >,
 >;
 
@@ -100,26 +98,27 @@ impl std::fmt::Debug for Dependency {
 }
 
 impl Dependency {
-    pub fn matches_glob(
-        &self,
-        glob: &PackageDepGlobMatcher,
-        target: PackageTarget,
-    ) -> Option<PackageDepIdent> {
+    pub fn matches_glob(&self, glob: &PackageDepGlobMatcher, target: PackageTarget) -> bool {
         if self.target() != target {
-            return None;
+            return false;
         }
-        let dep_ident = self.to_dep_ident();
-        if glob.is_match(&dep_ident) {
-            Some(dep_ident)
-        } else {
-            None
+        match self {
+            Dependency::ResolvedDep(ident) => glob.matches_package_ident(ident),
+            Dependency::RemoteDep(resolved_dep_ident) => {
+                glob.matches_package_resolved_dep_ident(resolved_dep_ident)
+            }
+            Dependency::LocalPlan(plan_ctx) => {
+                glob.matches_package_build_ident(plan_ctx.id.as_ref())
+            }
         }
     }
-    pub fn to_dep_ident(&self) -> PackageDepIdent {
+    pub fn matches_dep_ident(&self, dep_ident: &PackageDepIdent) -> bool {
         match self {
-            Dependency::ResolvedDep(dep) => PackageDepIdent::from(dep),
-            Dependency::RemoteDep(dep) => PackageDepIdent::from(dep),
-            Dependency::LocalPlan(plan_ctx) => PackageDepIdent::from(plan_ctx.id.as_ref()),
+            Dependency::ResolvedDep(ident) => ident.satisfies_dependency(dep_ident),
+            Dependency::RemoteDep(resolved_dep_ident) => {
+                resolved_dep_ident.satisfies_dependency(dep_ident)
+            }
+            Dependency::LocalPlan(plan_ctx) => plan_ctx.id.as_ref().satisfies_dependency(dep_ident),
         }
     }
     pub fn plan_ctx(&self) -> Option<&PlanContext> {
@@ -211,7 +210,7 @@ impl DepGraph {
                         .or_default()
                         .entry(package_ident.target)
                         .or_default()
-                        .entry(package_ident.version)
+                        .entry(PackageBuildVersion::Static(package_ident.version))
                         .or_default()
                         .entry(PackageRelease::Resolved(package_ident.release))
                         .or_insert(dep_node_index);
@@ -255,9 +254,9 @@ impl DepGraph {
                             .and_then(|v| v.get(&plan_dep.target))
                             .and_then(|v| match (&plan_dep.version, &plan_dep.release) {
                                 // Get the resolved version and last or specified release
-                                (PackageVersion::Resolved(version), release) => {
-                                    v.get(version).and_then(|v| v.get(release))
-                                }
+                                (PackageVersion::Resolved(version), release) => v
+                                    .get(&PackageBuildVersion::Static(version.to_owned()))
+                                    .and_then(|v| v.get(release)),
                                 // Get the last version, last release
                                 (PackageVersion::Unresolved, PackageRelease::Unresolved) => v
                                     .values()
@@ -393,11 +392,13 @@ impl DepGraph {
                             }
                         }
                         (true, false) => {
-                            dep_graph.build_graph.add_edge(
-                                dep_node_index,
-                                bootstrap_build_studio_node_index,
-                                DependencyType::Studio,
-                            );
+                            if !plan_ctx.is_native {
+                                dep_graph.build_graph.add_edge(
+                                    dep_node_index,
+                                    bootstrap_build_studio_node_index,
+                                    DependencyType::Studio,
+                                );
+                            }
                         }
                         (false, true) => {
                             if !plan_ctx.is_native {
@@ -449,14 +450,16 @@ impl DepGraph {
         Ok(dep_graph)
     }
 
-    pub fn glob_deps(
-        &self,
-        glob: &PackageDepGlobMatcher,
-        target: PackageTarget,
-    ) -> Vec<PackageDepIdent> {
+    pub fn glob_deps(&self, glob: &PackageDepGlobMatcher, target: PackageTarget) -> Vec<NodeIndex> {
         self.build_graph
             .node_references()
-            .filter_map(|(_, dep)| dep.matches_glob(glob, target))
+            .filter_map(|(dep_node_index, dep)| {
+                if dep.matches_glob(glob, target) {
+                    Some(dep_node_index)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>()
     }
 
@@ -693,14 +696,14 @@ impl DepGraph {
             }
         }
         self.build_graph.filter_map(
-            |node_index, node| {
+            |node_index, _node| {
                 if let Some(causes) = changed_deps.remove(&node_index) {
                     Some(causes)
                 } else {
                     None
                 }
             },
-            |edge_index, edge| Some(*edge),
+            |_edge_index, edge| Some(*edge),
         )
     }
 

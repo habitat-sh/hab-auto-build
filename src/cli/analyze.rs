@@ -1,14 +1,15 @@
-use color_eyre::{
-    eyre::{eyre, Context, Result},
-    owo_colors::OwoColorize,
-};
+use color_eyre::eyre::{eyre, Context, Result};
+use owo_colors::OwoColorize;
+use serde_json::json;
 use std::{collections::HashSet, env, path::PathBuf};
-use tracing::info;
+use tera::Tera;
+use tracing::{error, info};
 
-use clap::{Args};
+use clap::Args;
 
 use crate::core::{
-    AnalysisType, AutoBuildConfig, AutoBuildContext, Dependency, DependencyAnalysis, PackageDepIdent,
+    AnalysisType, AutoBuildConfig, AutoBuildContext, Dependency, DependencyAnalysis,
+    PackageDepGlob, PackageTarget,
 };
 
 use super::OutputFormat;
@@ -45,8 +46,10 @@ pub(crate) struct Params {
     /// Detect reverse build dependencies
     #[arg(long, default_value_t = false)]
     build_rdeps: bool,
+    #[arg(long)]
+    template: Option<String>,
     /// List of packages to include
-    packages: Vec<PackageDepIdent>,
+    packages: Vec<PackageDepGlob>,
 }
 
 pub(crate) fn execute(args: Params) -> Result<()> {
@@ -83,18 +86,24 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         analysis_types.insert(AnalysisType::ReverseBuildDependencies);
     }
 
-    let plan_analysis_list = args
-        .packages
-        .iter()
-        .map(|package| run_context.dep_analysis(package, &analysis_types))
+    let package_indices = run_context.glob_deps(&args.packages, PackageTarget::default())?;
+    if package_indices.is_empty() && !run_context.is_empty() && !args.packages.is_empty() {
+        error!(target: "user-log",
+            "No packages found matching patterns: {}",
+            serde_json::to_string(&args.packages).unwrap()
+        );
+        return Ok(());
+    }
+    let plan_analysis_list = package_indices
+        .into_iter()
+        .map(|package_index| run_context.dep_analysis(package_index, &analysis_types))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
-        .flatten()
         .collect::<Vec<_>>();
 
     match args.format {
         OutputFormat::Plain => output_plain(plan_analysis_list)?,
-        OutputFormat::Json => output_json(plan_analysis_list)?,
+        OutputFormat::Json => output_json(plan_analysis_list, args.template)?,
     }
 
     Ok(())
@@ -123,7 +132,7 @@ fn output_plain(dep_analysis_list: Vec<DependencyAnalysis>) -> Result<()> {
             );
             if let Some(dep) = dep_analysis.studio_dep.as_ref() {
                 if let Some(dep) = dep {
-                    info!(target: "user-ui", "{}\n{}\n", "Studio:".white().bold(), dep.to_dep_ident());
+                    info!(target: "user-ui", "{}\n{:?}\n", "Studio:".white().bold(), dep);
                 } else {
                     info!(target: "user-ui", "{}\nNATIVE\n", "Studio:".white().bold());
                 }
@@ -158,7 +167,7 @@ fn output_plain(dep_analysis_list: Vec<DependencyAnalysis>) -> Result<()> {
                 info!(target: "user-ui", "{}", format!("{}:",analysis_type).white().bold());
                 if !deps.is_empty() {
                     for dep in deps {
-                        info!(target: "user-ui", "{}", dep.to_dep_ident());
+                        info!(target: "user-ui", "{:?}", dep);
                     }
                     info!(target: "user-ui", "");
                 } else {
@@ -170,13 +179,23 @@ fn output_plain(dep_analysis_list: Vec<DependencyAnalysis>) -> Result<()> {
     Ok(())
 }
 
-fn output_json(plan_analysis_list: Vec<DependencyAnalysis>) -> Result<()> {
-    info!(
-        target: "user-ui",
-        "{}",
-        serde_json::to_string_pretty(&plan_analysis_list)
-            .context("Failed to serialize plan analysis into JSON")?
-    );
+fn output_json(
+    plan_analysis_list: Vec<DependencyAnalysis>,
+    template: Option<String>,
+) -> Result<()> {
+    if let Some(template) = template {
+        let context = tera::Context::from_serialize(json!({ "data": plan_analysis_list }))?;
+        let template = snailquote::unescape(format!("\"{}\"", template).as_str())?;
+        let result = Tera::one_off(&template, &context, false)?;
+        info!(target: "user-ui", "{}", result);
+    } else {
+        info!(
+            target: "user-ui",
+            "{}",
+            serde_json::to_string_pretty(&plan_analysis_list)
+                .context("Failed to serialize plan analysis into JSON")?
+        );
+    }
     Ok(())
 }
 

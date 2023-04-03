@@ -8,31 +8,84 @@ use std::{
 
 use crate::{
     core::{
-        ArtifactContext, Blake3, PackageIdent, PackageSha256Sum, PackageSource, PlanContextPath,
-        ShaSum, SourceContext,
+        ArtifactContext, Blake3, PackageBuildIdent, PackageSha256Sum, PackageSource,
+        PlanContextPath, SourceContext,
     },
-    store::model::SourceContextRecord,
+    store::{model::SourceContextRecord},
 };
 
-use self::model::{ArtifactContextRecord, FileModificationRecord};
-use chrono::{DateTime, Utc};
+use self::model::{ArtifactContextRecord, BuildTimeRecord, FileModificationRecord};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use color_eyre::eyre::{Context, Result};
 
 use diesel::{
     delete, insert_into,
     prelude::*,
     r2d2::{ConnectionManager, Pool, PooledConnection},
+    update,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tempdir::TempDir;
 use tracing::debug;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.9f";
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub(crate) struct StorePath(PathBuf);
 
 impl AsRef<Path> for StorePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct InvalidPackageSourceStorePath(PathBuf);
+
+impl AsRef<Path> for InvalidPackageSourceStorePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+impl InvalidPackageSourceStorePath {
+    pub fn archive_data_path(&self) -> InvalidPackageSourceArchiveStorePath {
+        InvalidPackageSourceArchiveStorePath(self.0.join("source"))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct TempDirStorePath(PathBuf);
+
+impl AsRef<Path> for TempDirStorePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct PackageBuildArtifactsStorePath(PathBuf);
+
+impl AsRef<Path> for PackageBuildArtifactsStorePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct PackageBuildSuccessLogsStorePath(PathBuf);
+
+impl AsRef<Path> for PackageBuildSuccessLogsStorePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct PackageBuildFailureLogsStorePath(PathBuf);
+
+impl AsRef<Path> for PackageBuildFailureLogsStorePath {
     fn as_ref(&self) -> &Path {
         self.0.as_path()
     }
@@ -51,15 +104,21 @@ impl PackageSourceStorePath {
     pub fn archive_data_path(&self) -> PackageSourceArchiveStorePath {
         PackageSourceArchiveStorePath(self.0.join("source"))
     }
-    pub fn license_data_path(&self) -> PackageSourceLicenseStorePath {
-        PackageSourceLicenseStorePath(self.0.join("licenses"))
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub(crate) struct PackageSourceArchiveStorePath(PathBuf);
 
 impl AsRef<Path> for PackageSourceArchiveStorePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct InvalidPackageSourceArchiveStorePath(PathBuf);
+
+impl AsRef<Path> for InvalidPackageSourceArchiveStorePath {
     fn as_ref(&self) -> &Path {
         self.0.as_path()
     }
@@ -81,6 +140,7 @@ pub(crate) struct Store {
 
 impl Store {
     pub fn new(path: impl AsRef<Path>) -> Result<Store> {
+        std::fs::create_dir_all(path.as_ref())?;
         let db_url = path
             .as_ref()
             .join("hab-auto-build.sqlite")
@@ -105,6 +165,10 @@ impl Store {
         })
     }
 
+    pub fn temp_dir_path(&self) -> TempDirStorePath {
+        TempDirStorePath(self.path.as_ref().join("tmp"))
+    }
+
     pub fn temp_dir(&self, prefix: &str) -> Result<TempDir> {
         let tmp_parent_dir = self.path.as_ref().join("tmp");
         std::fs::create_dir_all(tmp_parent_dir.as_path())?;
@@ -121,11 +185,32 @@ impl Store {
         Ok(self.pool.get()?)
     }
 
+    pub fn package_build_artifacts_path(&self) -> PackageBuildArtifactsStorePath {
+        PackageBuildArtifactsStorePath(self.path.as_ref().join("artifacts"))
+    }
+    pub fn package_build_success_logs_path(&self) -> PackageBuildSuccessLogsStorePath {
+        PackageBuildSuccessLogsStorePath(self.path.as_ref().join("build-success-logs"))
+    }
+    pub fn package_build_failure_logs_path(&self) -> PackageBuildFailureLogsStorePath {
+        PackageBuildFailureLogsStorePath(self.path.as_ref().join("build-failure-logs"))
+    }
+
     pub fn package_source_store_path(&self, source: &PackageSource) -> PackageSourceStorePath {
         PackageSourceStorePath(
             self.path
                 .as_ref()
                 .join("sources")
+                .join(source.shasum.to_string()),
+        )
+    }
+    pub fn invalid_source_store_path(
+        &self,
+        source: &PackageSource,
+    ) -> InvalidPackageSourceStorePath {
+        InvalidPackageSourceStorePath(
+            self.path
+                .as_ref()
+                .join("invalid-sources")
                 .join(source.shasum.to_string()),
         )
     }
@@ -168,11 +253,55 @@ pub(crate) fn files_alternate_modified_at_get_full_index(
             .or_default()
             .entry(PathBuf::from(row.file_path))
             .or_insert((
-                DateTime::<Utc>::from_utc(row.real_modified_at, Utc),
-                DateTime::<Utc>::from_utc(row.alternate_modified_at, Utc),
+                DateTime::<Utc>::from_utc(
+                    NaiveDateTime::parse_from_str(&row.real_modified_at, TIMESTAMP_FORMAT).unwrap(),
+                    Utc,
+                ),
+                DateTime::<Utc>::from_utc(
+                    NaiveDateTime::parse_from_str(&row.alternate_modified_at, TIMESTAMP_FORMAT)
+                        .unwrap(),
+                    Utc,
+                ),
             ));
     }
     Ok(ModificationIndex(results))
+}
+
+pub(crate) fn build_time_get(
+    connection: &mut SqliteConnection,
+    build_ident_value: &PackageBuildIdent,
+) -> Result<Option<BuildTimeRecord>> {
+    use crate::store::schema::build_times::dsl::*;
+    Ok(build_times
+        .filter(build_ident.eq(build_ident_value.to_string()))
+        .load::<BuildTimeRecord>(connection)?
+        .pop())
+}
+
+pub(crate) fn build_time_put(
+    connection: &mut SqliteConnection,
+    build_ident_value: &PackageBuildIdent,
+    build_duration_in_secs_value: i32,
+) -> Result<()> {
+    use crate::store::schema::build_times::dsl::*;
+    if build_times
+        .filter(build_ident.eq(build_ident_value.to_string()))
+        .load::<BuildTimeRecord>(connection)?
+        .first()
+        .is_none()
+    {
+        insert_into(build_times)
+            .values((
+                build_ident.eq(build_ident_value.to_string()),
+                duration_in_secs.eq(build_duration_in_secs_value),
+            ))
+            .execute(connection)?;
+    } else {
+        update(build_times.filter(build_ident.eq(build_ident_value.to_string())))
+            .set(duration_in_secs.eq(build_duration_in_secs_value))
+            .execute(connection)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn source_context_get(
@@ -254,13 +383,19 @@ pub(crate) fn file_alternate_modified_at_get(
     if let Some(row) = file_modifications
         .filter(plan_context_path.eq(plan_context_path_value.as_ref().to_str().unwrap()))
         .filter(file_path.eq(file_path_value.as_ref().to_str().unwrap()))
-        .filter(real_modified_at.eq(real_modified_at_value.naive_utc()))
+        .filter(
+            real_modified_at.eq(real_modified_at_value
+                .naive_utc()
+                .format(TIMESTAMP_FORMAT)
+                .to_string()
+                .as_str()),
+        )
         .limit(1)
         .load::<FileModificationRecord>(connection)?
         .first()
     {
         Ok(Some(DateTime::<Utc>::from_utc(
-            row.alternate_modified_at,
+            NaiveDateTime::parse_from_str(&row.alternate_modified_at, TIMESTAMP_FORMAT).unwrap(),
             Utc,
         )))
     } else {
@@ -273,19 +408,23 @@ pub(crate) fn file_alternate_modified_at_put(
     file_path_value: impl AsRef<Path>,
     real_modified_at_value: DateTime<Utc>,
     alternate_modified_at_value: DateTime<Utc>,
-) -> Result<bool> {
+) -> Result<()> {
     use crate::store::schema::file_modifications::dsl::*;
-
-    let results = insert_into(file_modifications)
+    insert_into(file_modifications)
         .values((
             plan_context_path.eq(plan_context_path_value.as_ref().to_str().unwrap()),
             file_path.eq(file_path_value.as_ref().to_str().unwrap()),
-            real_modified_at.eq(real_modified_at_value.naive_utc()),
-            alternate_modified_at.eq(alternate_modified_at_value.naive_utc()),
+            real_modified_at.eq(&real_modified_at_value
+                .naive_utc()
+                .format(TIMESTAMP_FORMAT)
+                .to_string()),
+            alternate_modified_at.eq(&alternate_modified_at_value
+                .naive_utc()
+                .format(TIMESTAMP_FORMAT)
+                .to_string()),
         ))
         .execute(connection)?;
-
-    Ok(results > 0)
+    Ok(())
 }
 pub(crate) fn plan_context_alternate_modified_at_delete(
     connection: &mut SqliteConnection,
@@ -302,8 +441,16 @@ pub(crate) fn plan_context_alternate_modified_at_delete(
             (
                 PathBuf::from(row.file_path),
                 (
-                    DateTime::<Utc>::from_utc(row.real_modified_at, Utc),
-                    DateTime::<Utc>::from_utc(row.alternate_modified_at, Utc),
+                    DateTime::<Utc>::from_utc(
+                        NaiveDateTime::parse_from_str(&row.real_modified_at, TIMESTAMP_FORMAT)
+                            .unwrap(),
+                        Utc,
+                    ),
+                    DateTime::<Utc>::from_utc(
+                        NaiveDateTime::parse_from_str(&row.alternate_modified_at, TIMESTAMP_FORMAT)
+                            .unwrap(),
+                        Utc,
+                    ),
                 ),
             )
         })

@@ -1,6 +1,10 @@
-use std::{fmt::Display, path::Path, str::FromStr};
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
-use globset::{GlobMatcher, Glob};
+use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize};
 
 use color_eyre::{
@@ -10,10 +14,13 @@ use color_eyre::{
 use lazy_static::lazy_static;
 use regex::Regex;
 
+use super::FSRootPath;
+
 lazy_static! {
     static ref IDENTIFIER_REGEX: Regex = Regex::new("^[A-Za-z0-9_-]+$").unwrap();
 }
 const DYNAMIC_VERSION: &str = "**DYNAMIC**";
+const BUILD_RELEASE: &str = "**DYNAMIC**";
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PackageName(String);
@@ -21,6 +28,9 @@ pub struct PackageName(String);
 impl PackageName {
     pub fn parse(value: impl AsRef<str>) -> Result<PackageName> {
         let value = value.as_ref();
+        if value.is_empty() {
+            return Err(eyre!("Package name is empty"));
+        }
         if !IDENTIFIER_REGEX.is_match(value) {
             return Err(eyre!("Invalid package name '{}'", value).with_suggestion(|| "The package name can only contain letters(A-Z, a-z), digits(0-9), underscore(_) and minus('-') symbols"));
         }
@@ -40,6 +50,9 @@ pub struct PackageOrigin(String);
 impl PackageOrigin {
     pub fn parse(value: impl AsRef<str>) -> Result<PackageOrigin> {
         let value = value.as_ref();
+        if value.is_empty() {
+            return Err(eyre!("Package origin is empty"));
+        }
         if !IDENTIFIER_REGEX.is_match(value) {
             return Err(eyre!("Invalid package origin '{}'", value).with_suggestion(|| "The package name can only contain letters(A-Z, a-z), digits(0-9), underscore(_) and minus('-') symbols"));
         }
@@ -83,42 +96,63 @@ impl From<PackageVersion> for Option<String> {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(try_from = "String", into = "String")]
-pub enum PackageResolvedVersion {
-    Static(String),
-    Dynamic,
-}
+pub struct PackageResolvedVersion(String);
 
 impl PackageResolvedVersion {
     pub fn parse(value: impl AsRef<str>) -> Result<PackageResolvedVersion> {
         let value = value.as_ref();
-        if value == DYNAMIC_VERSION {
-            Ok(PackageResolvedVersion::Dynamic)
-        } else {
-            Ok(PackageResolvedVersion::Static(value.to_string()))
+        if value.is_empty() {
+            return Err(eyre!("Package version is empty"));
         }
+        Ok(PackageResolvedVersion(value.to_string()))
     }
 }
 
 impl Display for PackageResolvedVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PackageResolvedVersion::Static(version) => write!(f, "{}", version),
-            PackageResolvedVersion::Dynamic => write!(f, "{}", DYNAMIC_VERSION),
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub enum PackageBuildVersion {
+    Static(PackageResolvedVersion),
+    Dynamic,
+}
+
+impl PackageBuildVersion {
+    pub fn parse(value: impl AsRef<str>) -> Result<PackageBuildVersion> {
+        let value = value.as_ref();
+        if value == DYNAMIC_VERSION {
+            Ok(PackageBuildVersion::Dynamic)
+        } else {
+            Ok(PackageBuildVersion::Static(PackageResolvedVersion::parse(
+                value,
+            )?))
         }
     }
 }
 
-impl TryFrom<String> for PackageResolvedVersion {
-    type Error = color_eyre::eyre::Error;
-
-    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-        PackageResolvedVersion::parse(value)
+impl Display for PackageBuildVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PackageBuildVersion::Static(version) => write!(f, "{}", version),
+            PackageBuildVersion::Dynamic => write!(f, "{}", DYNAMIC_VERSION),
+        }
     }
 }
 
-impl From<PackageResolvedVersion> for String {
-    fn from(value: PackageResolvedVersion) -> Self {
+impl TryFrom<String> for PackageBuildVersion {
+    type Error = color_eyre::eyre::Error;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        PackageBuildVersion::parse(value)
+    }
+}
+
+impl From<PackageBuildVersion> for String {
+    fn from(value: PackageBuildVersion) -> Self {
         value.to_string()
     }
 }
@@ -158,6 +192,9 @@ pub struct PackageResolvedRelease(String);
 impl PackageResolvedRelease {
     pub fn parse(value: impl AsRef<str>) -> Result<PackageResolvedRelease> {
         let value = value.as_ref();
+        if value.is_empty() {
+            return Err(eyre!("Package release is empty"));
+        }
         Ok(PackageResolvedRelease(value.to_string()))
     }
 }
@@ -273,6 +310,8 @@ impl Display for PackageOS {
 
 pub trait PackagePath {
     fn is_package_path(&self) -> bool;
+    fn package_path(&self) -> Option<PathBuf>;
+    fn relative_package_path(&self) -> Option<PathBuf>;
     fn package_ident(&self, target: PackageTarget) -> Option<PackageIdent>;
 }
 
@@ -307,6 +346,37 @@ where
             false
         }
     }
+    fn package_path(&self) -> Option<PathBuf> {
+        let mut components = self.as_ref().components();
+
+        components.next();
+        let hab_folder = components.next().and_then(|c| c.as_os_str().to_str());
+        let pkg_folder = components.next().and_then(|c| c.as_os_str().to_str());
+        let origin = components.next().and_then(|c| c.as_os_str().to_str());
+        let name = components.next().and_then(|c| c.as_os_str().to_str());
+        let version = components.next().and_then(|c| c.as_os_str().to_str());
+        let release = components.next().and_then(|c| c.as_os_str().to_str());
+
+        if let (Some("hab"), Some("pkgs"), Some(origin), Some(name), Some(version), Some(release)) =
+            (hab_folder, pkg_folder, origin, name, version, release)
+        {
+            Some(
+                FSRootPath::default().as_ref().join(
+                    ["hab", "pkgs", origin, name, version, release]
+                        .into_iter()
+                        .collect::<PathBuf>(),
+                ),
+            )
+        } else {
+            None
+        }
+    }
+
+    fn relative_package_path(&self) -> Option<PathBuf> {
+        self.package_path()
+            .map(|p| self.as_ref().strip_prefix(p).unwrap().to_path_buf())
+    }
+
     fn package_ident(&self, target: PackageTarget) -> Option<PackageIdent> {
         let mut components = self.as_ref().components();
 
@@ -357,52 +427,32 @@ impl PackageIdent {
         dep_ident.target == self.target
             && dep_ident.origin == self.origin
             && dep_ident.name == self.name
-            && match (&dep_ident.version, &self.version) {
-                (
-                    PackageVersion::Resolved(resolved_version),
-                    PackageResolvedVersion::Static(self_version),
-                ) => match resolved_version {
-                    PackageResolvedVersion::Static(resolved_version) => {
-                        resolved_version == self_version
-                    }
-                    PackageResolvedVersion::Dynamic => false,
-                },
-                (PackageVersion::Resolved(_resolved_version), PackageResolvedVersion::Dynamic) => {
-                    panic!("Package ident should not have a dynamic version")
-                }
-                (PackageVersion::Unresolved, _) => true,
+            && match &dep_ident.version {
+                PackageVersion::Resolved(resolved_version) => resolved_version == &self.version,
+                PackageVersion::Unresolved => true,
             }
-            && match (&dep_ident.release, &self.release) {
-                (PackageRelease::Resolved(resolved_release), self_release) => {
-                    resolved_release == self_release
-                }
-                (PackageRelease::Unresolved, _) => true,
+            && match &dep_ident.release {
+                PackageRelease::Resolved(resolved_release) => resolved_release == &self.release,
+                PackageRelease::Unresolved => true,
             }
     }
     pub fn satisfies_dependency(&self, dep_ident: &PackageDepIdent) -> bool {
         dep_ident.origin == self.origin
             && dep_ident.name == self.name
-            && match (&dep_ident.version, &self.version) {
-                (
-                    PackageVersion::Resolved(resolved_version),
-                    PackageResolvedVersion::Static(self_version),
-                ) => match resolved_version {
-                    PackageResolvedVersion::Static(resolved_version) => {
-                        resolved_version == self_version
-                    }
-                    PackageResolvedVersion::Dynamic => false,
-                },
-                (PackageVersion::Resolved(_resolved_version), PackageResolvedVersion::Dynamic) => {
-                    panic!("Package ident should not have a dynamic version")
-                }
-                (PackageVersion::Unresolved, _) => true,
+            && match &dep_ident.version {
+                PackageVersion::Resolved(resolved_version) => resolved_version == &self.version,
+                PackageVersion::Unresolved => true,
             }
-            && match (&dep_ident.release, &self.release) {
-                (PackageRelease::Resolved(resolved_release), self_release) => {
-                    resolved_release == self_release
-                }
-                (PackageRelease::Unresolved, _) => true,
+            && match &dep_ident.release {
+                PackageRelease::Resolved(resolved_release) => resolved_release == &self.release,
+                PackageRelease::Unresolved => true,
             }
+    }
+    pub fn artifact_name(&self) -> String {
+        format!(
+            "{}-{}-{}-{}-{}.hart",
+            self.origin, self.name, self.version, self.release, self.target
+        )
     }
 }
 
@@ -444,19 +494,13 @@ impl PackageResolvedDepIdent {
     pub fn satisfies_dependency(&self, dep_ident: &PackageDepIdent) -> bool {
         dep_ident.origin == self.origin
             && dep_ident.name == self.name
-            && match (&dep_ident.version, &self.version) {
-                (PackageVersion::Resolved(version), PackageVersion::Resolved(self_version)) => {
-                    version == self_version
-                }
-                (PackageVersion::Resolved(_), PackageVersion::Unresolved) => false,
-                (PackageVersion::Unresolved, _) => true,
+            && match &dep_ident.version {
+                resolved_version @ PackageVersion::Resolved(_) => resolved_version == &self.version,
+                PackageVersion::Unresolved => true,
             }
-            && match (&dep_ident.release, &self.release) {
-                (PackageRelease::Resolved(release), PackageRelease::Resolved(self_release)) => {
-                    release == self_release
-                }
-                (PackageRelease::Resolved(_), PackageRelease::Unresolved) => false,
-                (PackageRelease::Unresolved, _) => true,
+            && match &dep_ident.release {
+                resolved_release @ PackageRelease::Resolved(_) => resolved_release == &self.release,
+                PackageRelease::Unresolved => true,
             }
     }
 }
@@ -479,7 +523,7 @@ pub struct PackageBuildIdent {
     pub target: PackageTarget,
     pub origin: PackageOrigin,
     pub name: PackageName,
-    pub version: PackageResolvedVersion,
+    pub version: PackageBuildVersion,
 }
 
 impl Display for PackageBuildIdent {
@@ -496,9 +540,12 @@ impl PackageBuildIdent {
     pub fn satisfies_dependency(&self, dep_ident: &PackageDepIdent) -> bool {
         self.origin == dep_ident.origin
             && self.name == dep_ident.name
-            && match &dep_ident.version {
-                PackageVersion::Resolved(version) => self.version == *version,
-                PackageVersion::Unresolved => true,
+            && match (&dep_ident.version, &self.version) {
+                (PackageVersion::Resolved(_version), PackageBuildVersion::Dynamic) => false,
+                (PackageVersion::Resolved(version), PackageBuildVersion::Static(build_version)) => {
+                    version == build_version
+                }
+                (PackageVersion::Unresolved, _) => true,
             }
     }
 }
@@ -536,6 +583,9 @@ impl PackageDepIdent {
         } else {
             PackageRelease::Unresolved
         };
+        if let Some(tail) = parts.next() {
+            return Err(eyre!("Package has extra trailing string: {}", tail));
+        }
         Ok(PackageDepIdent {
             origin,
             name,
@@ -572,7 +622,10 @@ impl From<&PackageBuildIdent> for PackageDepIdent {
         PackageDepIdent {
             name: value.name.to_owned(),
             origin: value.origin.to_owned(),
-            version: PackageVersion::Resolved(value.version.to_owned()),
+            version: match &value.version {
+                PackageBuildVersion::Static(version) => PackageVersion::Resolved(version.clone()),
+                PackageBuildVersion::Dynamic => PackageVersion::Unresolved,
+            },
             release: PackageRelease::Unresolved,
         }
     }
@@ -669,7 +722,7 @@ impl Display for PackageType {
 #[serde(try_from = "String", into = "String")]
 pub struct PackageDepGlob {
     pub origin: String,
-    pub name: Option<String>,
+    pub name: String,
     pub version: Option<String>,
     pub release: Option<String>,
 }
@@ -682,9 +735,46 @@ impl PackageDepGlob {
             .next()
             .map(String::from)
             .ok_or(eyre!("Invalid package glob pattern"))?;
-        let name = parts.next().map(String::from);
+        if origin.is_empty() {
+            return Err(eyre!("Package origin pattern is empty"));
+        }
+        if let Err(err) = Glob::new(&origin) {
+            return Err(eyre!("Package origin pattern is invalid: {}", err));
+        }
+        let name = parts
+            .next()
+            .map(String::from)
+            .ok_or_else(|| eyre!("Package name missing in '{}'", value))?;
+        if name.is_empty() {
+            return Err(eyre!("Package name pattern is empty"));
+        }
+        if let Err(err) = Glob::new(&name) {
+            return Err(eyre!("Package name pattern is invalid: {}", err));
+        }
         let version = parts.next().map(String::from);
+        if let Some(version) = &version {
+            if version.is_empty() {
+                return Err(eyre!("Package version pattern is empty"));
+            }
+            if let Err(err) = Glob::new(&version) {
+                return Err(eyre!("Package version pattern is invalid: {}", err));
+            }
+        }
         let release = parts.next().map(String::from);
+        if let Some(release) = &release {
+            if release.is_empty() {
+                return Err(eyre!("Package release pattern is empty"));
+            }
+            if let Err(err) = Glob::new(&release) {
+                return Err(eyre!("Package release pattern is invalid: {}", err));
+            }
+        }
+        if let Some(tail) = parts.next() {
+            return Err(eyre!(
+                "Package glob pattern has extra trailing string: {}",
+                tail
+            ));
+        }
         Ok(PackageDepGlob {
             origin,
             name,
@@ -692,26 +782,31 @@ impl PackageDepGlob {
             release,
         })
     }
-    pub fn matcher(&self) -> Result<PackageDepGlobMatcher> {
-        Ok(PackageDepGlobMatcher {
-            origin: Glob::new(self.origin.as_str())?.compile_matcher(),
-            name: self.name.as_ref().map(|v| Glob::new(v.as_str())).transpose()?.map(|v| v.compile_matcher()),
-            version: self.version.as_ref().map(|v| Glob::new(v.as_str())).transpose()?.map(|v| v.compile_matcher()),
-            release: self.release.as_ref().map(|v| Glob::new(v.as_str())).transpose()?.map(|v| v.compile_matcher())
-        })
+    pub fn matcher(&self) -> PackageDepGlobMatcher {
+        PackageDepGlobMatcher {
+            origin: Glob::new(self.origin.as_str()).unwrap().compile_matcher(),
+            name: Glob::new(self.name.as_str()).unwrap().compile_matcher(),
+            version: self
+                .version
+                .as_ref()
+                .map(|v| Glob::new(v.as_str()).unwrap())
+                .map(|v| v.compile_matcher()),
+            release: self
+                .release
+                .as_ref()
+                .map(|v| Glob::new(v.as_str()).unwrap())
+                .map(|v| v.compile_matcher()),
+        }
     }
 }
 
 impl Display for PackageDepGlob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.origin)?;
-        if let Some(name) = self.name.as_ref() {
-            write!(f, "/{}", name)?;
-            if let Some(version) = self.version.as_ref() {
-                write!(f, "/{}", version)?;
-                if let Some(release) = self.release.as_ref() {
-                    write!(f, "/{}", release)?;
-                }
+        write!(f, "{}/{}", self.origin, self.name)?;
+        if let Some(version) = self.version.as_ref() {
+            write!(f, "/{}", version)?;
+            if let Some(release) = self.release.as_ref() {
+                write!(f, "/{}", release)?;
             }
         }
         Ok(())
@@ -743,28 +838,62 @@ impl FromStr for PackageDepGlob {
 #[derive(Debug)]
 pub struct PackageDepGlobMatcher {
     pub origin: GlobMatcher,
-    pub name: Option<GlobMatcher>,
+    pub name: GlobMatcher,
     pub version: Option<GlobMatcher>,
     pub release: Option<GlobMatcher>,
 }
 
 impl PackageDepGlobMatcher {
-    pub fn is_match(&self, dep_ident: &PackageDepIdent) -> bool {
-        self.origin.is_match(&dep_ident.origin.0)
-            && if let Some(name) = self.name.as_ref() {
-                name.is_match(&dep_ident.name.0)
+    pub fn matches_package_ident(&self, ident: &PackageIdent) -> bool {
+        self.origin.is_match(&ident.origin.0)
+            && self.name.is_match(&ident.name.0)
+            && if let Some(version) = self.version.as_ref() {
+                version.is_match(&ident.version.0)
             } else {
                 true
             }
+            && if let Some(release) = self.release.as_ref() {
+                release.is_match(&ident.release.0)
+            } else {
+                true
+            }
+    }
+    pub fn matches_package_resolved_dep_ident(
+        &self,
+        resolved_dep_ident: &PackageResolvedDepIdent,
+    ) -> bool {
+        self.origin.is_match(&resolved_dep_ident.origin.0)
+            && self.name.is_match(&resolved_dep_ident.name.0)
+            && if let Some(version) = self.version.as_ref() {
+                match resolved_dep_ident.version {
+                    PackageVersion::Resolved(ref resolved_version) => {
+                        version.is_match(&resolved_version.0)
+                    }
+                    PackageVersion::Unresolved => true,
+                }
+            } else {
+                true
+            }
+            && if let Some(release) = self.release.as_ref() {
+                match resolved_dep_ident.release {
+                    PackageRelease::Resolved(ref resolved_release) => {
+                        release.is_match(&resolved_release.0)
+                    }
+                    PackageRelease::Unresolved => true,
+                }
+            } else {
+                true
+            }
+    }
+    pub fn matches_package_dep_ident(&self, dep_ident: &PackageDepIdent) -> bool {
+        self.origin.is_match(&dep_ident.origin.0)
+            && self.name.is_match(&dep_ident.name.0)
             && if let Some(version) = self.version.as_ref() {
                 match dep_ident.version {
-                    PackageVersion::Resolved(ref resolved_version) => match resolved_version {
-                        PackageResolvedVersion::Static(ref resolved_version) => {
-                            version.is_match(resolved_version)
-                        }
-                        PackageResolvedVersion::Dynamic => true,
-                    },
-                    PackageVersion::Unresolved => false,
+                    PackageVersion::Resolved(ref resolved_version) => {
+                        version.is_match(&resolved_version.0)
+                    }
+                    PackageVersion::Unresolved => true,
                 }
             } else {
                 true
@@ -774,10 +903,150 @@ impl PackageDepGlobMatcher {
                     PackageRelease::Resolved(ref resolved_release) => {
                         release.is_match(&resolved_release.0)
                     }
-                    PackageRelease::Unresolved => false,
+                    PackageRelease::Unresolved => true,
                 }
             } else {
                 true
             }
+    }
+    pub fn matches_package_build_ident(&self, build_ident: &PackageBuildIdent) -> bool {
+        self.origin.is_match(&build_ident.origin.0)
+            && self.name.is_match(&build_ident.name.0)
+            && if let Some(version) = self.version.as_ref() {
+                match &build_ident.version {
+                    PackageBuildVersion::Static(resolved_version) => {
+                        version.is_match(&resolved_version.0)
+                    }
+                    PackageBuildVersion::Dynamic => version.is_match(DYNAMIC_VERSION),
+                }
+            } else {
+                true
+            }
+            && if let Some(release) = self.release.as_ref() {
+                release.is_match(BUILD_RELEASE)
+            } else {
+                true
+            }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_dep_ident_parsing() {
+        let valid_cases = &[
+            "core/hab",
+            "core/hab/1.0",
+            "core/hab/1.0/2032",
+            "core/hab/**DYNAMIC**",
+        ];
+        let invalid_cases = &[
+            "core",
+            "core\\hab",
+            "core/hab/1.0/2034/test",
+            "core/",
+            "core///",
+            "core/hab/",
+            "core/hab//",
+            "core//1.0/2034",
+            "core///2034",
+            "core/hab//2034",
+            "/hab/1.0/2034",
+            "//1.0/2034",
+            "///2034",
+            "///",
+            "core&/hab/1.0",
+        ];
+        for item in valid_cases {
+            assert!(PackageDepIdent::parse(item).is_ok());
+        }
+        for item in invalid_cases {
+            assert!(PackageDepIdent::parse(item).is_err());
+        }
+    }
+
+    #[test]
+    fn package_dep_glob_parsing() {
+        let valid_cases = &[
+            "core/hab",
+            "core/hab/1.0",
+            "core/hab/1.0/2032",
+            "core/hab/**DYNAMIC**",
+            "core&/hab/1.0",
+        ];
+        let invalid_cases = &[
+            "core",
+            "core\\hab",
+            "core/hab/1.0/2034/test",
+            "core/",
+            "core///",
+            "core/hab/",
+            "core/hab//",
+            "core//1.0/2034",
+            "core///2034",
+            "core/hab//2034",
+            "/hab/1.0/2034",
+            "//1.0/2034",
+            "///2034",
+            "///",
+        ];
+        for item in valid_cases {
+            assert!(PackageDepGlob::parse(item).is_ok());
+        }
+        for item in invalid_cases {
+            assert!(PackageDepGlob::parse(item).is_err());
+        }
+    }
+
+    #[test]
+    fn dynamic_build_ident_satisfies_package_dep_ident() {
+        let dynamic_ident = PackageBuildIdent {
+            target: PackageTarget::default(),
+            origin: PackageOrigin::parse("core").unwrap(),
+            name: PackageName::parse("hab").unwrap(),
+            version: PackageBuildVersion::Dynamic,
+        };
+
+        let satisfed_dep_idents = &["core/hab"];
+        let unsatisfied_dep_idents = &["core/hab/1.0", "core/hab/1.0/2020", "core/hab-studio"];
+
+        for dep_ident in satisfed_dep_idents {
+            let dep_ident = PackageDepIdent::parse(dep_ident).unwrap();
+            assert_eq!(dynamic_ident.satisfies_dependency(&dep_ident), true);
+        }
+        for dep_ident in unsatisfied_dep_idents {
+            let dep_ident = PackageDepIdent::parse(dep_ident).unwrap();
+            assert_eq!(dynamic_ident.satisfies_dependency(&dep_ident), false);
+        }
+    }
+
+    #[test]
+    fn dynamic_build_ident_satisfies_package_dep_glob() {
+        let dynamic_ident = PackageBuildIdent {
+            target: PackageTarget::default(),
+            origin: PackageOrigin::parse("core").unwrap(),
+            name: PackageName::parse("hab").unwrap(),
+            version: PackageBuildVersion::Dynamic,
+        };
+
+        let satisfed_dep_globs = &["core/hab", "core/hab/*", "core/hab/*/*"];
+        let unsatisfied_dep_globs = &[
+            "core/hab/1.0",
+            "core/hab/1.0/2020",
+            "core/hab-studio",
+            "core/hab/1.0/*",
+            "core/hab/*/2020",
+        ];
+
+        for dep_glob in satisfed_dep_globs {
+            let dep_glob = PackageDepGlob::parse(dep_glob).unwrap().matcher();
+            assert_eq!(dep_glob.matches_package_build_ident(&dynamic_ident), true);
+        }
+        for dep_glob in unsatisfied_dep_globs {
+            let dep_glob = PackageDepGlob::parse(dep_glob).unwrap().matcher();
+            assert_eq!(dep_glob.matches_package_build_ident(&dynamic_ident), false);
+        }
     }
 }

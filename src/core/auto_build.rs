@@ -2,12 +2,13 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     fs::File,
+    io::{Read},
     path::{Path, PathBuf},
-    sync::mpsc::channel,
+    sync::{mpsc::channel, Arc, RwLock},
     time::Instant,
 };
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration};
 use color_eyre::{
     eyre::{eyre, Context, Result},
     Help,
@@ -16,30 +17,33 @@ use diesel::{
     r2d2::{ConnectionManager, PooledConnection},
     Connection, SqliteConnection,
 };
-use globset::{Glob, GlobBuilder};
+
 use ignore::WalkBuilder;
 use lazy_static::lazy_static;
 use petgraph::{algo, stable_graph::NodeIndex};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace};
 
 use crate::{
     check::{
         ArtifactCheck, Checker, CheckerContext, ContextRules, LeveledArtifactCheckViolation,
-        LeveledSourceCheckViolation,
+        LeveledSourceCheckViolation, SourceCheck,
     },
     core::{
         ArtifactCache, ArtifactCachePath, Dependency, DependencyDepth, DependencyDirection,
         DependencyType, PackageSourceDownloadError, SourceContext,
     },
-    store::{self, Store},
+    store::{
+        self, InvalidPackageSourceArchiveStorePath, Store,
+    },
 };
 
 use super::{
-    DepGraph, DependencyChangeCause, PackageDepGlob, PackageDepIdent, PackageSha256Sum,
+    habitat, DepGraph, DependencyChangeCause, PackageDepGlob,
+    PackageDepIdent, PackageIdent, PackageOrigin, PackageSha256Sum,
     PackageSource, PackageTarget, PlanContext, PlanContextID, PlanScannerBuilder, RepoConfig,
-    RepoContext, RepoContextID, PackageResolvedDepIdent,
+    RepoContext, RepoContextID,
 };
 
 lazy_static! {
@@ -50,7 +54,7 @@ lazy_static! {
     pub static ref DEFAULT_STORE_PATH: PathBuf = PathBuf::from(".hab-auto-build");
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BuildStudioConfig {
     pub standard: PackageDepIdent,
     pub bootstrap: PackageDepIdent,
@@ -151,10 +155,11 @@ impl Display for AnalysisType {
 
 pub(crate) struct AutoBuildContext {
     path: AutoBuildContextPath,
+    studios: BuildStudioConfig,
     store: Store,
     repos: HashMap<RepoContextID, RepoContext>,
     dep_graph: DepGraph,
-    artifact_cache: ArtifactCache,
+    artifact_cache: Arc<RwLock<ArtifactCache>>,
 }
 
 pub(crate) struct DependencyChange<'a> {
@@ -162,13 +167,52 @@ pub(crate) struct DependencyChange<'a> {
     pub causes: Vec<DependencyChangeCause>,
 }
 
-pub(crate) struct BuildDryRun<'a> {
-    pub order: Vec<(
-        &'a Dependency,
-        Option<&'a Dependency>,
-        Vec<&'a Dependency>,
-        Vec<DependencyChangeCause>,
-    )>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildStepStudio {
+    Native,
+    Bootstrap,
+    Standard,
+}
+
+impl Display for BuildStepStudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildStepStudio::Native => write!(f, "native"),
+            BuildStepStudio::Bootstrap => write!(f, "bootstrap"),
+            BuildStepStudio::Standard => write!(f, "standard"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CheckStep<'a> {
+    pub index: NodeIndex,
+    pub dependency: &'a Dependency,
+}
+
+#[derive(Debug)]
+pub(crate) struct BuildStep<'a> {
+    pub index: NodeIndex,
+    pub repo_ctx: &'a RepoContext,
+    pub plan_ctx: &'a PlanContext,
+    pub studio: BuildStepStudio,
+    pub studio_package: Option<&'a PackageDepIdent>,
+    pub origins: HashSet<PackageOrigin>,
+    pub deps_to_install: Vec<&'a PlanContextID>,
+    pub remote_deps: Vec<&'a Dependency>,
+    pub causes: Vec<DependencyChangeCause>,
+    pub build_duration: Option<Duration>,
+}
+
+#[derive(Debug)]
+pub(crate) struct BuildStepResult {
+    pub artifact_ident: PackageIdent,
+    pub artifact_violations: Vec<LeveledArtifactCheckViolation>,
+}
+
+pub(crate) struct BuildPlan<'a> {
+    pub check_steps: Vec<CheckStep<'a>>,
+    pub build_steps: Vec<BuildStep<'a>>,
 }
 
 pub(crate) enum AddStatus {
@@ -178,10 +222,8 @@ pub(crate) enum AddStatus {
 
 #[derive(Debug, Error)]
 pub(crate) enum AddError {
-    #[error("No plans for package '{0}' found")]
-    PlansNotFound(PackageDepIdent),
     #[error("Encountered an unexpected error while trying to add the package to the change list")]
-    UnexpectedError(#[source] color_eyre::eyre::Error),
+    UnexpectedError(#[from] color_eyre::eyre::Error),
 }
 
 pub(crate) enum RemoveStatus {
@@ -192,34 +234,48 @@ pub(crate) enum RemoveStatus {
 
 #[derive(Debug, Error)]
 pub(crate) enum RemoveError {
-    #[error("No plans for package '{0}' found")]
-    PlansNotFound(PackageDepIdent),
     #[error(
         "Encountered an unexpected error while trying to remove the package from the change list"
     )]
-    UnexpectedError(#[source] color_eyre::eyre::Error),
+    UnexpectedError(#[from] color_eyre::eyre::Error),
 }
 
-pub(crate) enum CheckStatus {
+pub(crate) enum PlanCheckStatus {
     CheckSucceeded(
-        PackageResolvedDepIdent,
         Vec<LeveledSourceCheckViolation>,
         Vec<LeveledArtifactCheckViolation>,
     ),
-    ArtifactNotFound(PackageResolvedDepIdent),
+    ArtifactNotFound,
 }
 
 pub(crate) enum DownloadStatus {
-    Downloaded(SourceContext, PlanContext, PackageSource, Duration),
-    AlreadyDownloaded(SourceContext, PlanContext, PackageSource),
-    NoSource(PlanContext),
-    InvalidArchive(PlanContext, PackageSource, PackageSha256Sum),
+    Downloaded(
+        SourceContext,
+        PlanContext,
+        PackageSource,
+        Duration,
+        Vec<LeveledSourceCheckViolation>,
+    ),
+    AlreadyDownloaded(
+        SourceContext,
+        PlanContext,
+        PackageSource,
+        Vec<LeveledSourceCheckViolation>,
+    ),
+    MissingSource(PlanContext),
+    NoSource,
+    InvalidArchive(
+        PlanContext,
+        PackageSource,
+        PackageSha256Sum,
+        InvalidPackageSourceArchiveStorePath,
+    ),
 }
 
 #[derive(Debug, Error)]
 pub(crate) enum DownloadError {
-    #[error("No plans for package '{0}' found")]
-    PlansNotFound(PackageDepIdent),
+    #[error("Sources for plan {0} is corrupt")]
+    CorruptedSource(PlanContextID),
     #[error("Encountered an unexpected error while trying to download the package sources")]
     UnexpectedDownloadError(#[source] PackageSourceDownloadError),
     #[error("Encountered an unexpected io error while trying to download the package sources")]
@@ -276,7 +332,12 @@ impl AutoBuildContext {
         } else {
             auto_build_ctx_path.as_ref().join(store_path)
         };
-        let store = Store::new(store_path)?;
+        let store = Store::new(&store_path).with_context(|| {
+            format!(
+                "Failed to initialize hab-auto-build store at {}",
+                store_path.display()
+            )
+        })?;
 
         // Scan artifact cache
         let artifact_cache = ArtifactCache::new(ArtifactCachePath::default(), &store)?;
@@ -288,7 +349,6 @@ impl AutoBuildContext {
             } else {
                 let mut new_walk_builder = WalkBuilder::new(repo_ctx.path.as_ref());
                 new_walk_builder.follow_links(false);
-                new_walk_builder.threads(0);
                 dir_walk_builder = Some(new_walk_builder);
             }
         }
@@ -344,191 +404,229 @@ impl AutoBuildContext {
 
         Ok(AutoBuildContext {
             path: auto_build_ctx_path,
+            studios: config.studios.clone(),
             store,
             repos,
             dep_graph,
-            artifact_cache,
+            artifact_cache: Arc::new(RwLock::new(artifact_cache)),
         })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dep_graph.build_graph.node_count() == 0
     }
 
     pub fn glob_deps(
         &self,
         globs: &[PackageDepGlob],
         target: PackageTarget,
-    ) -> Result<Vec<PackageDepIdent>> {
+    ) -> Result<Vec<NodeIndex>> {
         let mut results = Vec::new();
         for glob in globs {
-            let glob = glob.matcher()?;
+            let glob = glob.matcher();
             results.extend(self.dep_graph.glob_deps(&glob, target));
         }
         Ok(results)
     }
 
-    pub fn dep_analysis<'a>(
-        &'a self,
-        dep_ident: &PackageDepIdent,
-        analysis_types: &HashSet<AnalysisType>,
-    ) -> Result<Vec<DependencyAnalysis<'a>>> {
-        let mut results = Vec::new();
-        for dep_node_index in self.dep_graph.get_dep_nodes(dep_ident) {
-            let dep = &self.dep_graph.build_graph[dep_node_index];
-            let (repo_ctx, plan_ctx) = match dep {
-                Dependency::ResolvedDep(_) => (None, None),
-                Dependency::RemoteDep(_) => (None, None),
-                Dependency::LocalPlan(plan_ctx) => {
-                    let repo_ctx = self
-                        .repos
-                        .get(&plan_ctx.repo_id)
-                        .expect("Plan must belong to a repo");
-                    (Some(repo_ctx), Some(plan_ctx))
-                }
-            };
-
-            results.push(DependencyAnalysis {
-                dep_ctx: &self.dep_graph.build_graph[dep_node_index],
-                repo_ctx,
-                plan_ctx,
-                deps: analysis_types
-                    .get(&AnalysisType::Dependencies)
-                    .map(|t| self.node_dep_analysis(dep_node_index, *t))
-                    .transpose()?,
-                build_deps: analysis_types
-                    .get(&AnalysisType::BuildDependencies)
-                    .map(|t| self.node_dep_analysis(dep_node_index, *t))
-                    .transpose()?,
-                tdeps: analysis_types
-                    .get(&AnalysisType::TransitiveDependencies)
-                    .map(|t| self.node_dep_analysis(dep_node_index, *t))
-                    .transpose()?,
-                build_tdeps: analysis_types
-                    .get(&AnalysisType::TransitiveBuildDependencies)
-                    .map(|t| self.node_dep_analysis(dep_node_index, *t))
-                    .transpose()?,
-                rdeps: analysis_types
-                    .get(&AnalysisType::ReverseDependencies)
-                    .map(|t| self.node_dep_analysis(dep_node_index, *t))
-                    .transpose()?,
-                build_rdeps: analysis_types
-                    .get(&AnalysisType::ReverseBuildDependencies)
-                    .map(|t| self.node_dep_analysis(dep_node_index, *t))
-                    .transpose()?,
-                studio_dep: analysis_types
-                    .get(&AnalysisType::StudioDependency)
-                    .map(|t| self.node_dep_analysis(dep_node_index, *t))
-                    .transpose()?
-                    .map(|mut d| d.pop()),
-            });
-        }
-
-        Ok(results)
+    pub fn dep(&self, dep_node_index: NodeIndex) -> &Dependency {
+        self.dep_graph.dep(dep_node_index)
     }
 
-    pub fn download_source_archive(
+    pub fn dep_analysis<'a>(
+        &'a self,
+        dep_node_index: NodeIndex,
+        analysis_types: &HashSet<AnalysisType>,
+    ) -> Result<DependencyAnalysis<'a>> {
+        let dep = &self.dep_graph.build_graph[dep_node_index];
+        let (repo_ctx, plan_ctx) = match dep {
+            Dependency::ResolvedDep(_) => (None, None),
+            Dependency::RemoteDep(_) => (None, None),
+            Dependency::LocalPlan(plan_ctx) => {
+                let repo_ctx = self
+                    .repos
+                    .get(&plan_ctx.repo_id)
+                    .expect("Plan must belong to a repo");
+                (Some(repo_ctx), Some(plan_ctx))
+            }
+        };
+
+        Ok(DependencyAnalysis {
+            dep_ctx: &self.dep_graph.build_graph[dep_node_index],
+            repo_ctx,
+            plan_ctx,
+            deps: analysis_types
+                .get(&AnalysisType::Dependencies)
+                .map(|t| self.node_dep_analysis(dep_node_index, *t))
+                .transpose()?,
+            build_deps: analysis_types
+                .get(&AnalysisType::BuildDependencies)
+                .map(|t| self.node_dep_analysis(dep_node_index, *t))
+                .transpose()?,
+            tdeps: analysis_types
+                .get(&AnalysisType::TransitiveDependencies)
+                .map(|t| self.node_dep_analysis(dep_node_index, *t))
+                .transpose()?,
+            build_tdeps: analysis_types
+                .get(&AnalysisType::TransitiveBuildDependencies)
+                .map(|t| self.node_dep_analysis(dep_node_index, *t))
+                .transpose()?,
+            rdeps: analysis_types
+                .get(&AnalysisType::ReverseDependencies)
+                .map(|t| self.node_dep_analysis(dep_node_index, *t))
+                .transpose()?,
+            build_rdeps: analysis_types
+                .get(&AnalysisType::ReverseBuildDependencies)
+                .map(|t| self.node_dep_analysis(dep_node_index, *t))
+                .transpose()?,
+            studio_dep: analysis_types
+                .get(&AnalysisType::StudioDependency)
+                .map(|t| self.node_dep_analysis(dep_node_index, *t))
+                .transpose()?
+                .map(|mut d| d.pop()),
+        })
+    }
+
+    pub fn download_dep_source(
         &self,
-        package: &PackageDepIdent,
-    ) -> Result<Vec<DownloadStatus>, DownloadError> {
-        let mut results = Vec::new();
-        let plan_node_indices = self.dep_graph.get_plan_nodes(package);
-        if plan_node_indices.is_empty() {
-            return Err(DownloadError::PlansNotFound(package.to_owned()));
+        package_index: NodeIndex,
+        check_source: bool,
+    ) -> Result<DownloadStatus, DownloadError> {
+        if let Some(plan_ctx) = self.dep_graph.dep(package_index).plan_ctx() {
+            self.download_plan_source(plan_ctx, check_source)
+        } else {
+            Ok(DownloadStatus::NoSource)
         }
-        let tmp_dir = self
-            .store
-            .temp_dir("download")
-            .map_err(DownloadError::UnexpectedError)?;
-        for plan_ctx in self
-            .dep_graph
-            .deps(&plan_node_indices)
-            .into_iter()
-            .filter_map(|d| d.plan_ctx())
-        {
-            if let Some(source) = plan_ctx.source.as_ref() {
-                let source_store_path = self.store.package_source_store_path(source);
-                let source_archive_path = source_store_path.archive_data_path();
-                if source_archive_path.as_ref().is_file() {
-                    match source.verify_pkg_archive(source_archive_path.as_ref()) {
-                        Ok(_) => {
-                            let existing_source_ctx = self
-                                .store
-                                .get_connection()
-                                .map_err(DownloadError::UnexpectedError)?
-                                .transaction(|connection| {
-                                    store::source_context_get(connection, &source.shasum)
-                                })
-                                .map_err(DownloadError::UnexpectedError)?;
-                            let source_ctx = if let Some(existing_source_ctx) = existing_source_ctx
-                            {
-                                existing_source_ctx
-                            } else {
-                                let new_source_ctx =
-                                    SourceContext::read_from_disk(source_archive_path)
-                                        .map_err(DownloadError::UnexpectedError)?;
-                                self.store
-                                    .get_connection()
-                                    .map_err(DownloadError::UnexpectedError)?
-                                    .transaction(|connection| {
-                                        store::source_context_put(
-                                            connection,
-                                            &source.shasum,
-                                            &new_source_ctx,
-                                        )
-                                    })
-                                    .map_err(DownloadError::UnexpectedError)?;
-                                new_source_ctx
-                            };
-                            results.push(DownloadStatus::AlreadyDownloaded(
-                                source_ctx,
-                                plan_ctx.clone(),
-                                source.clone(),
-                            ));
-                            continue;
-                        }
-                        Err(_) => todo!(),
-                    }
-                }
-                let temp_file_path = tmp_dir.path().join("download.part");
-                info!(
-                    "Downloading sources for package {} from {} to {}",
-                    plan_ctx.id,
-                    source.url,
-                    temp_file_path.display()
-                );
-                match source.download_and_verify_pkg_archive(temp_file_path.as_path()) {
-                    Ok(download_duration) => {
-                        std::fs::create_dir_all(source_store_path.as_ref())
-                            .map_err(DownloadError::UnexpectedIOError)?;
-                        std::fs::rename(temp_file_path.as_path(), source_archive_path.as_ref())
-                            .map_err(DownloadError::UnexpectedIOError)?;
-                        let source_ctx = SourceContext::read_from_disk(source_archive_path)
-                            .map_err(DownloadError::UnexpectedError)?;
-                        self.store
+    }
+
+    pub fn download_plan_source(
+        &self,
+        plan_ctx: &PlanContext,
+        check_source: bool,
+    ) -> Result<DownloadStatus, DownloadError> {
+        if let Some(source) = &plan_ctx.source {
+            let source_store_path = self.store.package_source_store_path(source);
+            let source_archive_path = source_store_path.archive_data_path();
+
+            let invalid_source_store_path = self.store.invalid_source_store_path(source);
+            let invalid_source_archive_path = invalid_source_store_path.archive_data_path();
+
+            if source_archive_path.as_ref().is_file() {
+                match source.verify_pkg_archive(source_archive_path.as_ref()) {
+                    Ok(_) => {
+                        let existing_source_ctx = self
+                            .store
                             .get_connection()
                             .map_err(DownloadError::UnexpectedError)?
                             .transaction(|connection| {
-                                store::source_context_put(connection, &source.shasum, &source_ctx)
+                                store::source_context_get(connection, &source.shasum)
                             })
                             .map_err(DownloadError::UnexpectedError)?;
-
-                        results.push(DownloadStatus::Downloaded(
+                        let source_ctx = if let Some(existing_source_ctx) = existing_source_ctx {
+                            existing_source_ctx
+                        } else {
+                            let new_source_ctx = SourceContext::read_from_disk(source_archive_path)
+                                .map_err(DownloadError::UnexpectedError)?;
+                            self.store
+                                .get_connection()
+                                .map_err(DownloadError::UnexpectedError)?
+                                .transaction(|connection| {
+                                    store::source_context_put(
+                                        connection,
+                                        &source.shasum,
+                                        &new_source_ctx,
+                                    )
+                                })
+                                .map_err(DownloadError::UnexpectedError)?;
+                            new_source_ctx
+                        };
+                        let source_violations = if check_source {
+                            let checker = Checker::new();
+                            checker.source_context_check_with_plan(
+                                &plan_ctx.context_rules(),
+                                &plan_ctx,
+                                &source_ctx,
+                            )
+                        } else {
+                            vec![]
+                        };
+                        return Ok(DownloadStatus::AlreadyDownloaded(
                             source_ctx,
                             plan_ctx.clone(),
                             source.clone(),
-                            download_duration,
+                            source_violations,
                         ));
                     }
-                    Err(PackageSourceDownloadError::Sha256SumMismatch(expected, actual)) => results
-                        .push(DownloadStatus::InvalidArchive(
-                            plan_ctx.clone(),
-                            source.clone(),
-                            actual,
-                        )),
-                    Err(err) => return Err(DownloadError::UnexpectedDownloadError(err)),
+                    Err(_) => {
+                        error!(target: "user-log", "Source for package {} is corrupted", plan_ctx.id);
+                        return Err(DownloadError::CorruptedSource(plan_ctx.id.clone()));
+                    }
                 }
-            } else {
-                results.push(DownloadStatus::NoSource(plan_ctx.clone()))
             }
+            let tmp_dir = self
+                .store
+                .temp_dir("download")
+                .map_err(DownloadError::UnexpectedError)?;
+            let temp_file_path = tmp_dir.path().join("download.part");
+            info!(
+                "Downloading sources for package {} from {} to {}",
+                plan_ctx.id,
+                source.url,
+                temp_file_path.display()
+            );
+            match source.download_and_verify_pkg_archive(temp_file_path.as_path()) {
+                Ok(download_duration) => {
+                    std::fs::create_dir_all(source_store_path.as_ref())
+                        .map_err(DownloadError::UnexpectedIOError)?;
+                    std::fs::rename(temp_file_path.as_path(), source_archive_path.as_ref())
+                        .map_err(DownloadError::UnexpectedIOError)?;
+                    let source_ctx = SourceContext::read_from_disk(source_archive_path)
+                        .map_err(DownloadError::UnexpectedError)?;
+                    self.store
+                        .get_connection()
+                        .map_err(DownloadError::UnexpectedError)?
+                        .transaction(|connection| {
+                            store::source_context_put(connection, &source.shasum, &source_ctx)
+                        })
+                        .map_err(DownloadError::UnexpectedError)?;
+                    let source_violations = if check_source {
+                        let checker = Checker::new();
+                        checker.source_context_check_with_plan(
+                            &plan_ctx.context_rules(),
+                            &plan_ctx,
+                            &source_ctx,
+                        )
+                    } else {
+                        vec![]
+                    };
+                    Ok(DownloadStatus::Downloaded(
+                        source_ctx,
+                        plan_ctx.clone(),
+                        source.clone(),
+                        download_duration,
+                        source_violations,
+                    ))
+                }
+                Err(PackageSourceDownloadError::Sha256SumMismatch(_expected, actual)) => {
+                    std::fs::create_dir_all(invalid_source_store_path.as_ref())
+                        .map_err(DownloadError::UnexpectedIOError)?;
+                    std::fs::rename(
+                        temp_file_path.as_path(),
+                        invalid_source_archive_path.as_ref(),
+                    )
+                    .map_err(DownloadError::UnexpectedIOError)?;
+                    Ok(DownloadStatus::InvalidArchive(
+                        plan_ctx.clone(),
+                        source.clone(),
+                        actual,
+                        invalid_source_archive_path,
+                    ))
+                }
+                Err(err) => return Err(DownloadError::UnexpectedDownloadError(err)),
+            }
+        } else {
+            Ok(DownloadStatus::MissingSource(plan_ctx.clone()))
         }
-        Ok(results)
     }
 
     fn node_dep_analysis(
@@ -618,7 +716,7 @@ impl AutoBuildContext {
             .collect())
     }
 
-    pub fn changes(&self) -> Vec<RepoChanges<'_>> {
+    pub fn changes(&self, package_indices: &[NodeIndex]) -> Vec<RepoChanges<'_>> {
         self.dep_graph
             .detect_changes_in_repos()
             .into_iter()
@@ -627,11 +725,15 @@ impl AutoBuildContext {
                 changes: changes
                     .into_iter()
                     .filter_map(|(dep_index, causes)| {
-                        match &self.dep_graph.build_graph[dep_index] {
-                            Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => None,
-                            Dependency::LocalPlan(plan_ctx) => {
-                                Some(DependencyChange { plan_ctx, causes })
+                        if package_indices.contains(&dep_index) {
+                            match &self.dep_graph.build_graph[dep_index] {
+                                Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => None,
+                                Dependency::LocalPlan(plan_ctx) => {
+                                    Some(DependencyChange { plan_ctx, causes })
+                                }
                             }
+                        } else {
+                            None
                         }
                     })
                     .collect(),
@@ -654,86 +756,62 @@ impl AutoBuildContext {
     pub fn add_plans_to_changes(
         &mut self,
         connection: &mut SqliteConnection,
-        package: &PackageDepIdent,
+        plan_node_indices: &[NodeIndex],
     ) -> Result<Vec<AddStatus>, AddError> {
-        let plan_node_indices = self.dep_graph.get_plan_nodes(package);
-        if plan_node_indices.is_empty() {
-            return Err(AddError::PlansNotFound(package.to_owned()));
-        }
         let mut results = Vec::new();
+        let plan_node_changes = self.dep_graph.detect_changes_in_deps(plan_node_indices);
+        let artifact_cache = self.artifact_cache.read().unwrap();
         for plan_node_index in plan_node_indices {
-            let mut is_added = false;
-            match self.dep_graph.dep_mut(plan_node_index) {
+            match self.dep_graph.dep_mut(*plan_node_index) {
                 Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
                 Dependency::LocalPlan(ref mut plan_ctx) => {
-                    // Find the file with the greatest last modification timestamp
-                    // within the plan context, if it was previously altered.
-                    let mut greatest_modified_at: Option<DateTime<Utc>> = None;
-                    if let Some(existing_paths) = store::plan_context_alternate_modified_at_delete(
-                        connection,
-                        &plan_ctx.context_path,
-                    )
-                    .map_err(AddError::UnexpectedError)?
-                    {
-                        for (_, (real_modified_at, _)) in existing_paths {
-                            if let Some(modified_at) = greatest_modified_at.as_mut() {
-                                if *modified_at < real_modified_at {
-                                    *modified_at = real_modified_at;
-                                }
-                            } else {
-                                greatest_modified_at = Some(real_modified_at);
-                            }
-                        }
-                        is_added = true;
-                    }
+                    let causes = plan_node_changes.get(&plan_node_index);
+                    if causes.is_none() {
+                        let latest_plan_artifact = artifact_cache
+                            .latest_plan_artifact(&plan_ctx.id)
+                            .expect("Plan artifact must be present");
 
-                    if let Some(latest_plan_artifact) = plan_ctx.latest_artifact.as_ref() {
-                        // If the file with the greatest modified timestamp is more
-                        // recent than the last built artifact, we do not need to artifically
-                        // make a more recently modified target context folder.
-                        let mut touch_target_ctx = true;
-                        if let Some(modified_at) = greatest_modified_at {
-                            if modified_at > latest_plan_artifact.created_at {
-                                touch_target_ctx = false;
-                            }
-                        }
-
-                        // If we need to artificially modify the target context
-                        // and the plan's context is older the last artifact update it.
-                        if touch_target_ctx
-                            && plan_ctx.target_context_last_modified_at
-                                < latest_plan_artifact.created_at
-                        {
+                        // Delete any modifications for the plan context that may be present
+                        store::plan_context_alternate_modified_at_delete(
+                            connection,
+                            &plan_ctx.context_path,
+                        )?;
+                        plan_ctx.determine_changes(
+                            Some(connection),
+                            None,
+                            Some(latest_plan_artifact),
+                        )?;
+                        if plan_ctx.files_changed.is_empty() {
                             let alternate_modified_at =
                                 latest_plan_artifact.created_at + Duration::seconds(1);
-
-                            if store::file_alternate_modified_at_put(
+                            store::file_alternate_modified_at_put(
                                 connection,
                                 &plan_ctx.context_path,
                                 plan_ctx.target_context_path.clone(),
                                 plan_ctx.target_context_last_modified_at,
                                 alternate_modified_at,
-                            )
-                            .map_err(AddError::UnexpectedError)?
-                            {
-                                is_added = true;
-                            }
-                        }
-                    } else {
-                        is_added = false
-                    }
-                    if is_added {
-                        plan_ctx
-                            .determine_changes(
+                            )?;
+                            plan_ctx.determine_changes(
                                 Some(connection),
                                 None,
-                                self.artifact_cache.latest_plan_artifact(&plan_ctx.id),
-                            )
-                            .map_err(AddError::UnexpectedError)?;
+                                Some(latest_plan_artifact),
+                            )?;
+                        }
+                        debug!(
+                            "Plan {} has been forcefully added to the change list",
+                            plan_ctx.id
+                        );
                         results.push(AddStatus::Added(plan_ctx.id.clone()));
                     } else {
+                        debug!("Plan {} already in change list", plan_ctx.id);
                         results.push(AddStatus::AlreadyAdded(plan_ctx.id.clone()));
                     }
+                    assert!({
+                        let plan_node_changes =
+                            self.dep_graph.detect_changes_in_deps(&[*plan_node_index]);
+                        let causes = plan_node_changes.get(&plan_node_index);
+                        causes.is_some()
+                    })
                 }
             }
         }
@@ -743,17 +821,13 @@ impl AutoBuildContext {
     pub fn remove_plans_from_changes(
         &mut self,
         connection: &mut SqliteConnection,
-        package: &PackageDepIdent,
+        plan_node_indices: &[NodeIndex],
     ) -> Result<Vec<RemoveStatus>, RemoveError> {
-        let plan_node_indices = self.dep_graph.get_plan_nodes(package);
-        if plan_node_indices.is_empty() {
-            return Err(RemoveError::PlansNotFound(package.to_owned()));
-        }
         let mut results = Vec::new();
-        let plan_node_changes = self.dep_graph.detect_changes_in_deps(&plan_node_indices);
+        let plan_node_changes = self.dep_graph.detect_changes_in_deps(plan_node_indices);
+        let artifact_cache = self.artifact_cache.read().unwrap();
         for plan_node_index in plan_node_indices {
-            let mut is_removed = false;
-            match self.dep_graph.dep_mut(plan_node_index) {
+            match self.dep_graph.dep_mut(*plan_node_index) {
                 Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
                 Dependency::LocalPlan(ref mut plan_ctx) => {
                     let causes = plan_node_changes.get(&plan_node_index);
@@ -761,8 +835,8 @@ impl AutoBuildContext {
                         let mut blocking_causes = Vec::new();
                         for cause in causes {
                             match cause {
-                                DependencyChangeCause::PlanContextChanged { .. } => {}
-                                DependencyChangeCause::DependencyStudioNeedRebuild { .. } => {}
+                                DependencyChangeCause::PlanContextChanged { .. }
+                                | DependencyChangeCause::DependencyStudioNeedRebuild { .. } => {}
                                 DependencyChangeCause::DependencyArtifactsUpdated { .. }
                                 | DependencyChangeCause::DependencyPlansNeedRebuild { .. }
                                 | DependencyChangeCause::NoBuiltArtifact => {
@@ -777,50 +851,56 @@ impl AutoBuildContext {
                             ));
                             continue;
                         }
-                    }
-
-                    let latest_plan_artifact = plan_ctx.latest_artifact.as_ref().unwrap();
-                    for changed_file in plan_ctx.files_changed.iter() {
-                        if store::file_alternate_modified_at_put(
+                        let latest_plan_artifact = artifact_cache
+                            .latest_plan_artifact(&plan_ctx.id)
+                            .expect("Plan artifact must be present");
+                        // Delete any modifications for the plan context that may be present
+                        store::plan_context_alternate_modified_at_delete(
                             connection,
                             &plan_ctx.context_path,
-                            changed_file.path.clone(),
-                            changed_file.real_last_modified_at,
-                            latest_plan_artifact.created_at,
-                        )
-                        .map_err(RemoveError::UnexpectedError)?
-                        {
-                            is_removed = true;
-                        }
-                    }
-
-                    if is_removed {
-                        plan_ctx
-                            .determine_changes(
+                        )?;
+                        plan_ctx.determine_changes(
+                            Some(connection),
+                            None,
+                            artifact_cache.latest_plan_artifact(&plan_ctx.id),
+                        )?;
+                        if !plan_ctx.files_changed.is_empty() {
+                            for changed_file in plan_ctx.files_changed.iter() {
+                                store::file_alternate_modified_at_put(
+                                    connection,
+                                    &plan_ctx.context_path,
+                                    changed_file.path.clone(),
+                                    changed_file.real_last_modified_at,
+                                    latest_plan_artifact.created_at,
+                                )?;
+                            }
+                            plan_ctx.determine_changes(
                                 Some(connection),
                                 None,
-                                self.artifact_cache.latest_plan_artifact(&plan_ctx.id),
-                            )
-                            .map_err(RemoveError::UnexpectedError)?;
+                                artifact_cache.latest_plan_artifact(&plan_ctx.id),
+                            )?;
+                        }
                         results.push(RemoveStatus::Removed(plan_ctx.id.clone()));
                     } else {
                         results.push(RemoveStatus::AlreadyRemoved(plan_ctx.id.clone()));
                     }
+                    assert!({
+                        let plan_node_changes =
+                            self.dep_graph.detect_changes_in_deps(&[*plan_node_index]);
+                        let causes = plan_node_changes.get(&plan_node_index);
+                        causes.is_none()
+                    })
                 }
             }
         }
         Ok(results)
     }
 
-    pub fn build_dry_run(&self, packages: Vec<PackageDepIdent>) -> BuildDryRun {
-        let package_indices = packages
-            .into_iter()
-            .flat_map(|dep_ident| self.dep_graph.get_dep_nodes(&dep_ident))
-            .collect::<Vec<_>>();
+    pub fn build_plan_generate(&self, package_indices: Vec<NodeIndex>) -> Result<BuildPlan> {
         let base_changes_graph = self.dep_graph.detect_changes();
 
         let mut changes_graph = base_changes_graph
-            .filter_map(|node_index, node| Some(node), |edge_index, edge| Some(edge));
+            .filter_map(|_node_index, node| Some(node), |_edge_index, edge| Some(edge));
 
         if !package_indices.is_empty() {
             changes_graph = changes_graph.filter_map(
@@ -839,25 +919,64 @@ impl AutoBuildContext {
                     }
                     None
                 },
-                |edge_index, edge| Some(*edge),
+                |_edge_index, edge| Some(*edge),
             );
         }
-
+        let node_indices = changes_graph.node_indices().into_iter().collect::<Vec<_>>();
+        let mut check_deps = self.dep_graph.get_deps(
+            &node_indices,
+            vec![
+                DependencyType::Runtime,
+                DependencyType::Build,
+                DependencyType::Studio,
+            ]
+            .into_iter()
+            .collect(),
+            DependencyDepth::Transitive,
+            DependencyDirection::Forward,
+            false,
+            true,
+        );
+        check_deps.reverse();
         let mut build_order = algo::toposort(&changes_graph, None).unwrap();
         build_order.reverse();
-
-        BuildDryRun {
-            order: build_order
-                .into_iter()
-                .map(|n| {
-                    (
-                        &self.dep_graph.build_graph[n],
-                        self.node_dep_analysis(n, AnalysisType::StudioDependency)
+        self.store.get_connection()?.transaction(|connection| {
+            Ok(BuildPlan {
+                check_steps: check_deps
+                    .into_iter()
+                    .filter(|node_index| !build_order.contains(node_index))
+                    .map(|node_index| CheckStep {
+                        index: node_index,
+                        dependency: &self.dep_graph.build_graph[node_index],
+                    })
+                    .collect(),
+                build_steps: build_order
+                    .into_iter()
+                    .map(|node_index| {
+                        let (studio, studio_package) = match self
+                            .node_dep_analysis(node_index, AnalysisType::StudioDependency)
                             .unwrap()
-                            .pop(),
-                        self.dep_graph
+                            .pop()
+                        {
+                            Some(package_dep)
+                                if package_dep.matches_dep_ident(&self.studios.bootstrap) =>
+                            {
+                                (BuildStepStudio::Bootstrap, Some(&self.studios.bootstrap))
+                            }
+                            Some(package_dep)
+                                if package_dep.matches_dep_ident(&self.studios.standard) =>
+                            {
+                                (BuildStepStudio::Standard, Some(&self.studios.standard))
+                            }
+                            None => (BuildStepStudio::Native, None),
+                            Some(package_dep) => {
+                                panic!("Invalid studio dependency {:?}", package_dep);
+                            }
+                        };
+                        let deps_to_install = self
+                            .dep_graph
                             .get_deps(
-                                Some(n).iter(),
+                                Some(node_index).iter(),
                                 [DependencyType::Build, DependencyType::Runtime]
                                     .into_iter()
                                     .collect(),
@@ -868,106 +987,178 @@ impl AutoBuildContext {
                             )
                             .into_iter()
                             .filter_map(|d| match &self.dep_graph.build_graph[d] {
-                                Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {
-                                    Some(&self.dep_graph.build_graph[d])
-                                }
-                                Dependency::LocalPlan(_) => None,
+                                Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => None,
+                                Dependency::LocalPlan(plan_ctx) => Some(&plan_ctx.id),
                             })
-                            .collect::<Vec<_>>(),
-                        changes_graph[n].clone(),
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    pub fn build(&self, packages: Vec<PackageDepIdent>) -> Result<()> {
-        let package_indices = packages
-            .into_iter()
-            .flat_map(|dep_ident| self.dep_graph.get_dep_nodes(&dep_ident))
-            .collect::<Vec<_>>();
-        let base_changes_graph = self.dep_graph.detect_changes();
-
-        let mut changes_graph = base_changes_graph
-            .filter_map(|node_index, node| Some(node), |edge_index, edge| Some(edge));
-
-        if !package_indices.is_empty() {
-            changes_graph = changes_graph.filter_map(
-                |node_index, node| {
-                    for package_index in package_indices.iter() {
-                        if changes_graph.contains_node(*package_index)
-                            && algo::has_path_connecting(
-                                &changes_graph,
-                                *package_index,
-                                node_index,
-                                None,
+                            .collect::<Vec<_>>();
+                        let origins = self
+                            .dep_graph
+                            .get_deps(
+                                Some(node_index).iter(),
+                                [DependencyType::Build, DependencyType::Runtime]
+                                    .into_iter()
+                                    .collect(),
+                                DependencyDepth::Transitive,
+                                DependencyDirection::Forward,
+                                true,
+                                false,
                             )
-                        {
-                            return Some(*node);
-                        }
-                    }
-                    None
-                },
-                |edge_index, edge| Some(*edge),
-            );
-        }
-
-        let mut build_order = algo::toposort(&changes_graph, None).unwrap();
-        build_order.reverse();
-
-        for dep in self.dep_graph.deps(&build_order) {
-            match dep {
-                Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
-                Dependency::LocalPlan(plan_ctx) => {
-                    self.build_plan(plan_ctx);
-                }
-            }
-        }
-        Ok(())
+                            .into_iter()
+                            .filter_map(|d| match &self.dep_graph.build_graph[d] {
+                                Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => None,
+                                Dependency::LocalPlan(plan_ctx) => {
+                                    Some(plan_ctx.id.as_ref().origin.clone())
+                                }
+                            })
+                            .collect::<HashSet<_>>();
+                        let plan_ctx = self.dep_graph.build_graph[node_index]
+                            .plan_ctx()
+                            .expect("Dependency must be a plan");
+                        let repo_ctx = self
+                            .repos
+                            .get(&plan_ctx.repo_id)
+                            .expect("Plan must belong to a repo");
+                        let build_duration =
+                            store::build_time_get(connection, plan_ctx.id.as_ref())?
+                                .map(|value| Duration::seconds(value.duration_in_secs as i64));
+                        Ok(BuildStep {
+                            index: node_index,
+                            repo_ctx,
+                            plan_ctx,
+                            studio,
+                            studio_package,
+                            deps_to_install,
+                            origins,
+                            remote_deps: self
+                                .dep_graph
+                                .get_deps(
+                                    Some(node_index).iter(),
+                                    [DependencyType::Build, DependencyType::Runtime]
+                                        .into_iter()
+                                        .collect(),
+                                    DependencyDepth::Direct,
+                                    DependencyDirection::Forward,
+                                    false,
+                                    false,
+                                )
+                                .into_iter()
+                                .filter_map(|d| match &self.dep_graph.build_graph[d] {
+                                    Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {
+                                        Some(&self.dep_graph.build_graph[d])
+                                    }
+                                    Dependency::LocalPlan(_) => None,
+                                })
+                                .collect::<Vec<_>>(),
+                            causes: changes_graph[node_index].clone(),
+                            build_duration,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            })
+        })
     }
 
-    pub fn check(&self, package: &PackageDepIdent) -> Result<Vec<CheckStatus>> {
-        let mut results = Vec::new();
-        let package = package.to_resolved_dep_ident(PackageTarget::default());
-        if let Some(artifact) = self.artifact_cache.latest_artifact(&package) {
-            let dep_ident = PackageDepIdent::from(&artifact.id);
-            let rules = if let Some(plan_node_index) =
-                self.dep_graph.get_dep_nodes(&dep_ident).into_iter().next()
-            {
-                match &self.dep_graph.build_graph[plan_node_index] {
-                    Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {
-                        ContextRules::default()
-                    }
-                    Dependency::LocalPlan(plan_ctx) => plan_ctx.context_rules(),
+    pub fn package_check(&self, package_index: NodeIndex) -> Result<PlanCheckStatus> {
+        let artifact_cache = self.artifact_cache.read().unwrap();
+        let (rules, artifact) = {
+            match &self.dep_graph.build_graph[package_index] {
+                Dependency::ResolvedDep(ident) => {
+                    (ContextRules::default(), artifact_cache.artifact(ident))
                 }
-            } else {
-                ContextRules::default()
-            };
+                Dependency::RemoteDep(resolved_dep_ident) => (
+                    ContextRules::default(),
+                    artifact_cache.latest_artifact(resolved_dep_ident),
+                ),
+                Dependency::LocalPlan(plan_ctx) => (
+                    plan_ctx.context_rules(),
+                    artifact_cache.latest_plan_artifact(&plan_ctx.id),
+                ),
+            }
+        };
+        let source_violations = match self.download_dep_source(package_index, true)? {
+            DownloadStatus::Downloaded(_source_ctx, _plan_ctx, _, _, source_violations) => {
+                Some(source_violations)
+            }
+            DownloadStatus::AlreadyDownloaded(_source_ctx, _plan_ctx, _, source_violations) => {
+                Some(source_violations)
+            }
+            DownloadStatus::MissingSource(_) | DownloadStatus::InvalidArchive(_, _, _, _) => None,
+            DownloadStatus::NoSource => {
+                panic!("Cannot check dependencies that are not plans")
+            }
+        };
+        let artifact_violations = if let Some(artifact) = artifact {
             let checker = Checker::new();
             let mut checker_context = CheckerContext::default();
-            let artifact_violations = checker.artifact_context_check(
+            Some(checker.artifact_context_check(
                 &rules,
                 &mut checker_context,
-                &self.artifact_cache,
+                &artifact_cache,
                 artifact,
-            );
-            results.push(CheckStatus::CheckSucceeded(
-                package,
-                Vec::new(),
-                artifact_violations,
-            ));
+            ))
         } else {
-            results.push(CheckStatus::ArtifactNotFound(package));
-        }
-        Ok(results)
+            None
+        };
+        Ok(PlanCheckStatus::CheckSucceeded(
+            source_violations.unwrap_or_default(),
+            artifact_violations.unwrap_or_default(),
+        ))
     }
 
-    pub fn build_plan(&self, plan_ctx: &PlanContext) {
-        info!(target: "user-ui", "Building {}", plan_ctx.plan_path.as_ref().display());
+    pub fn build_step_execute(&self, build_step: &BuildStep<'_>) -> Result<BuildStepResult> {
+        let mut artifact_cache = self.artifact_cache.write().unwrap();
+        let start = Instant::now();
+        let artifact_ctx = {
+            match build_step.studio {
+                BuildStepStudio::Native => {
+                    habitat::native_package_build(&build_step, &artifact_cache, &self.store)?
+                }
+                BuildStepStudio::Bootstrap => {
+                    habitat::bootstrap_package_build(&build_step, &artifact_cache, &self.store, 1)?
+                }
+                BuildStepStudio::Standard => {
+                    habitat::standard_package_build(&build_step, &artifact_cache, &self.store, 1)?
+                }
+            }
+        };
+        // Add the artifact to the cache
+        let artifact_ident = artifact_cache.artifact_add(&self.store, artifact_ctx)?;
+        let artifact_ctx = artifact_cache.artifact(&artifact_ident).unwrap();
+        // Check the artifact for violations
+        let checker = Checker::new();
+        let mut checker_context = CheckerContext::default();
+        let artifact_violations = checker.artifact_context_check(
+            &build_step.plan_ctx.context_rules(),
+            &mut checker_context,
+            &artifact_cache,
+            &artifact_ctx,
+        );
+        let elapsed_duration_in_secs = start.elapsed().as_secs() as i32;
+        self.store.get_connection()?.transaction(|connection| {
+            store::build_time_put(
+                connection,
+                build_step.plan_ctx.id.as_ref(),
+                elapsed_duration_in_secs,
+            )
+        })?;
+        // Install the aritfact if it is a studio
+        let is_bootstrap_studio_package = build_step
+            .plan_ctx
+            .id
+            .as_ref()
+            .satisfies_dependency(&self.studios.bootstrap);
+        let is_standard_studio_package = build_step
+            .plan_ctx
+            .id
+            .as_ref()
+            .satisfies_dependency(&self.studios.standard);
+        if is_bootstrap_studio_package || is_standard_studio_package {
+            habitat::install_artifact(&artifact_cache.path.artifact_path(&artifact_ctx.id))?;
+        }
+
+        Ok(BuildStepResult {
+            artifact_ident,
+            artifact_violations,
+        })
     }
 }
-
-// - Download package source to temp dir
-// - Verify downloaded file
-// - If verified, copy to source archive store
-// - Scan source archive for license files and cache them for license checks

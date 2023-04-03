@@ -1,4 +1,4 @@
-use std::{fmt::Display, fs::File, io::Read, path::Path};
+use std::{fmt::Display, fs::File, hash::Hash, io::Read, path::Path};
 
 use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,6 @@ impl Display for ShaSum {
     }
 }
 
-
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(from = "String", into = "String")]
 pub struct Blake3(String);
@@ -69,6 +68,13 @@ impl Blake3 {
             }
             hasher.update_rayon(&buffer[..n]);
         }
+        let result = hasher.finalize();
+        Ok(Blake3(result.to_string()))
+    }
+    pub fn hash_value(value: impl Serialize) -> Result<Blake3> {
+        let mut hasher = blake3::Hasher::new();
+        let value = serde_json::to_string(&value)?;
+        hasher.update_rayon(value.as_bytes());
         let result = hasher.finalize();
         Ok(Blake3(result.to_string()))
     }

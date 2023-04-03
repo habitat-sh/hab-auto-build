@@ -33,7 +33,6 @@ fn download_license_archive(
 fn read_license_archive(
     license_archive: impl AsRef<Path>,
     store: &mut Store,
-    deprecated_store: &mut Store,
 ) -> Result<()> {
     let license_archive = std::fs::File::open(license_archive.as_ref())?;
     let reader = BufReader::new(license_archive);
@@ -63,10 +62,10 @@ fn read_license_archive(
                     entry_path.display()
                 )
             })?;
-            let is_deprecated = data["isDeprecatedLicenseId"]
-                .as_bool()
-                .expect("missing license deprecation");
-
+            let is_deprecated = data["isDeprecatedLicenseId"].as_bool().expect("missing isDeprecatedLicenseId");
+            if is_deprecated {
+                continue
+            }
             let id = data["licenseId"]
                 .as_str()
                 .or_else(|| data["licenseExceptionId"].as_str())
@@ -75,12 +74,7 @@ fn read_license_archive(
                 .as_str()
                 .or_else(|| data["licenseExceptionText"].as_str())
                 .expect("missing license text");
-
-            if is_deprecated {
-                deprecated_store.add_license(id.into(), text.into());
-            } else {
-                store.add_license(id.into(), text.into());
-            }
+            store.add_license(id.into(), text.into());
         }
     }
     Ok(())
@@ -90,7 +84,6 @@ fn main() -> Result<()> {
     let out_dir = env::var_os("OUT_DIR").unwrap();
     let license_archive = Path::new(&out_dir).join("license-archive.tar.gz");
     let license_cache = Path::new(&out_dir).join("license-cache.bin.gz");
-    let deprecated_license_cache = Path::new(&out_dir).join("deprecated-license-cache.bin.gz");
     if !license_archive.exists() {
         let mut download_attempts = 3;
         while download_attempts > 0 {
@@ -106,17 +99,12 @@ fn main() -> Result<()> {
         }
         _ = std::fs::remove_file(license_cache.as_path());
     }
-
     if !license_cache.is_file() {
         let mut store = Store::new();
-        let mut deprecated_store = Store::new();
-        read_license_archive(&license_archive, &mut store, &mut deprecated_store)?;
+        read_license_archive(license_archive, &mut store)?;
         let mut cache = std::fs::File::create(license_cache)?;
-        let mut deprecated_cache = std::fs::File::create(deprecated_license_cache)?;
         store.to_cache(&mut cache).expect("Failed to serialize store");
         cache.sync_all()?;
-        deprecated_store.to_cache(&mut deprecated_cache).expect("Failed to serialize store");
-        deprecated_cache.sync_all()?
     }
 
     Ok(())

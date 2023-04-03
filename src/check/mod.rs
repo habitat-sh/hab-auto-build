@@ -1,23 +1,29 @@
 mod artifact;
 mod source;
 
-use std::collections::{HashMap, HashSet};
-
-use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+};
 
 use crate::core::{ArtifactCache, ArtifactContext, PackageIdent, PlanContext, SourceContext};
 
+use color_eyre::eyre::{eyre, Result};
+use owo_colors::OwoColorize;
+use serde::{Deserialize, Serialize};
+use toml_edit::{Array, Document, Formatted, InlineTable, Value};
+use tracing::debug;
+
 use self::{
     artifact::elf::{ElfCheck, ElfRule},
-    artifact::package::{PackageCheck, PackageRule},
+    artifact::package::{PackageBeforeCheck, PackageRule},
     artifact::{
         elf::ElfRuleOptions,
-        package::PackageRuleOptions,
+        package::{PackageAfterCheck, PackageRuleOptions},
         script::{ScriptCheck, ScriptRule, ScriptRuleOptions},
     },
     source::license::{
-        LicenseCheck, LicenseNotFound, LicenseNotFoundOptions, LicenseRule, LicenseRuleOptions,
-        MissingLicenseOptions,
+        LicenseCheck, LicenseRule, LicenseRuleOptions,
     },
 };
 
@@ -29,6 +35,19 @@ pub(crate) enum ViolationLevel {
     Error,
     #[serde(rename = "off")]
     Off,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct PlanConfig {
+    #[serde(default)]
+    rules: Vec<RuleConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub(crate) enum RuleConfig {
+    Source(SourceRule),
+    Artifact(ArtifactRule),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -45,6 +64,64 @@ impl ContextRules {
         self.artifact_rules.extend_from_slice(&other.artifact_rules);
         self
     }
+    pub fn from_str(value: &str) -> Result<ContextRules> {
+        let document = value.parse::<Document>()?;
+        let mut restructured_document = Document::new();
+        let mut restructured_rules = Array::default();
+        if let Some(rules) = document.get("rules") {
+            let rules = rules
+                .as_table()
+                .ok_or(eyre!("Invalid plan configuration, 'rules' must be a table"))?;
+            for (rule_id, rule_config) in rules.iter() {
+                if let Some(level) = rule_config.as_str() {
+                    let mut rule = InlineTable::default();
+                    rule.insert(
+                        "id",
+                        Value::String(Formatted::<String>::new(rule_id.to_string())),
+                    );
+                    let mut rule_options = InlineTable::default();
+                    rule_options.insert(
+                        "level",
+                        Value::String(Formatted::<String>::new(level.to_string())),
+                    );
+                    rule.insert("options", Value::InlineTable(rule_options));
+                    restructured_rules.push(Value::InlineTable(rule));
+                } else if rule_config.is_inline_table() {
+                    let mut rule = InlineTable::default();
+                    rule.insert(
+                        "id",
+                        Value::String(Formatted::<String>::new(rule_id.to_string())),
+                    );
+                    rule.insert(
+                        "options",
+                        Value::InlineTable(rule_config.as_inline_table().unwrap().clone()),
+                    );
+                    restructured_rules.push(Value::InlineTable(rule));
+                } else {
+                    return Err(eyre!(
+                        "Invalid rule configuration for '{}'",
+                        rule_id.to_string()
+                    ));
+                }
+            }
+        }
+        restructured_document.insert("rules", toml_edit::value(restructured_rules));
+        let plan_config: PlanConfig = toml_edit::de::from_document(restructured_document)
+            .map_err(|err| eyre!("Invalid .hab-plan-config.toml file: {}", err))?;
+        let mut context_rules = ContextRules {
+            source_rules: vec![],
+            artifact_rules: vec![],
+        };
+        for rule in plan_config.rules {
+            match rule {
+                RuleConfig::Source(source_rule) => context_rules.source_rules.push(source_rule),
+                RuleConfig::Artifact(artifact_rule) => {
+                    context_rules.artifact_rules.push(artifact_rule)
+                }
+            }
+        }
+        Ok(context_rules)
+    }
 }
 
 impl Default for ContextRules {
@@ -58,6 +135,11 @@ impl Default for ContextRules {
                 },
                 SourceRule {
                     options: SourceRuleOptions::License(LicenseRuleOptions::LicenseNotFound(
+                        Default::default(),
+                    )),
+                },
+                SourceRule {
+                    options: SourceRuleOptions::License(LicenseRuleOptions::InvalidLicenseExpression(
                         Default::default(),
                     )),
                 },
@@ -149,6 +231,16 @@ impl Default for ContextRules {
                     )),
                 },
                 ArtifactRule {
+                    options: ArtifactRuleOptions::Package(PackageRuleOptions::UnusedDependency(
+                        Default::default(),
+                    )),
+                },
+                ArtifactRule {
+                    options: ArtifactRuleOptions::Package(
+                        PackageRuleOptions::DuplicateRuntimeBinary(Default::default()),
+                    ),
+                },
+                ArtifactRule {
                     options: ArtifactRuleOptions::Script(ScriptRuleOptions::HostScriptInterpreter(
                         Default::default(),
                     )),
@@ -215,6 +307,40 @@ pub(crate) struct LeveledSourceCheckViolation {
     pub violation: SourceCheckViolation,
 }
 
+impl Display for LeveledSourceCheckViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.level {
+            ViolationLevel::Warn => write!(
+                f,
+                "{}{} {}",
+                "warning: ".yellow().bold(),
+                format!(
+                    "[{}]",
+                    serde_json::to_value(&self.violation).unwrap()["rule"]
+                        .as_str()
+                        .unwrap()
+                )
+                .bright_black(),
+                self.violation,
+            ),
+            ViolationLevel::Error => write!(
+                f,
+                "{}{} {}",
+                "  error: ".red().bold(),
+                format!(
+                    "[{}]",
+                    serde_json::to_value(&self.violation).unwrap()["rule"]
+                        .as_str()
+                        .unwrap()
+                )
+                .bright_black(),
+                self.violation,
+            ),
+            ViolationLevel::Off => write!(f, ""),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "category")]
 pub(crate) enum SourceCheckViolation {
@@ -222,10 +348,52 @@ pub(crate) enum SourceCheckViolation {
     License(LicenseRule),
 }
 
+impl Display for SourceCheckViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceCheckViolation::License(rule) => write!(f, "{}", rule),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct LeveledArtifactCheckViolation {
     pub level: ViolationLevel,
     pub violation: ArtifactCheckViolation,
+}
+
+impl Display for LeveledArtifactCheckViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.level {
+            ViolationLevel::Warn => write!(
+                f,
+                "{}{} {}",
+                "warning: ".yellow().bold(),
+                format!(
+                    "[{}]",
+                    serde_json::to_value(&self.violation).unwrap()["rule"]
+                        .as_str()
+                        .unwrap()
+                )
+                .bright_black(),
+                self.violation,
+            ),
+            ViolationLevel::Error => write!(
+                f,
+                "{}{} {}",
+                "  error: ".red().bold(),
+                format!(
+                    "[{}]",
+                    serde_json::to_value(&self.violation).unwrap()["rule"]
+                        .as_str()
+                        .unwrap()
+                )
+                .bright_black(),
+                self.violation,
+            ),
+            ViolationLevel::Off => write!(f, ""),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -237,6 +405,16 @@ pub(crate) enum ArtifactCheckViolation {
     Package(PackageRule),
     #[serde(rename = "script")]
     Script(ScriptRule),
+}
+
+impl Display for ArtifactCheckViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArtifactCheckViolation::Elf(rule) => write!(f, "{}", rule),
+            ArtifactCheckViolation::Package(rule) => write!(f, "{}", rule),
+            ArtifactCheckViolation::Script(rule) => write!(f, "{}", rule),
+        }
+    }
 }
 
 pub(crate) trait SourceCheck {
@@ -289,9 +467,10 @@ impl Checker {
         Checker {
             source_checks: vec![Box::new(LicenseCheck::default())],
             artifact_checks: vec![
-                Box::new(PackageCheck::default()),
+                Box::new(PackageBeforeCheck::default()),
                 Box::new(ElfCheck::default()),
                 Box::new(ScriptCheck::default()),
+                Box::new(PackageAfterCheck::default()),
             ],
         }
     }
@@ -304,6 +483,7 @@ impl SourceCheck for Checker {
         plan_context: &PlanContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
+        debug!("Checking package source against plan for issues");
         let mut violations = Vec::new();
         for source_check in self.source_checks.iter() {
             let mut source_violations =
@@ -319,6 +499,7 @@ impl SourceCheck for Checker {
         artifact_context: &ArtifactContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
+        debug!("Checking package source against artifact for issues");
         let mut violations = Vec::new();
         for source_check in self.source_checks.iter() {
             let mut source_violations = source_check.source_context_check_with_artifact(
@@ -340,6 +521,7 @@ impl ArtifactCheck for Checker {
         artifact_cache: &ArtifactCache,
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
+        debug!("Checking package artifact for issues");
         let mut violations = Vec::new();
         for artifact_check in self.artifact_checks.iter() {
             let mut artifact_violations = artifact_check.artifact_context_check(
