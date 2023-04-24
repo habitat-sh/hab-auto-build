@@ -8,7 +8,7 @@ use std::{
 
 use crate::core::{ArtifactCache, ArtifactContext, PackageIdent, PlanContext, SourceContext};
 
-use color_eyre::eyre::{eyre, Result};
+use color_eyre::{eyre::{eyre, Result}, Help, SectionExt};
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use toml_edit::{Array, Document, Formatted, InlineTable, Value};
@@ -106,8 +106,9 @@ impl ContextRules {
             }
         }
         restructured_document.insert("rules", toml_edit::value(restructured_rules));
-        let plan_config: PlanConfig = toml_edit::de::from_document(restructured_document)
-            .map_err(|err| eyre!("Invalid .hab-plan-config.toml file: {}", err))?;
+        let plan_config: PlanConfig = toml_edit::de::from_document(restructured_document.clone())
+            .map_err(|err| eyre!("Invalid .hab-plan-config.toml file: {}", err))
+            .with_section(|| restructured_document.to_string().header("Restructured Rules:"))?;
         let mut context_rules = ContextRules {
             source_rules: vec![],
             artifact_rules: vec![],
@@ -156,12 +157,22 @@ impl Default for ContextRules {
                     )),
                 },
                 ArtifactRule {
+                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::UnusedRPathEntry(
+                        Default::default(),
+                    )),
+                },
+                ArtifactRule {
                     options: ArtifactRuleOptions::Elf(
                         ElfRuleOptions::MissingRunPathEntryDependency(Default::default()),
                     ),
                 },
                 ArtifactRule {
                     options: ArtifactRuleOptions::Elf(ElfRuleOptions::BadRunPathEntry(
+                        Default::default(),
+                    )),
+                },
+                ArtifactRule {
+                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::UnusedRunPathEntry(
                         Default::default(),
                     )),
                 },

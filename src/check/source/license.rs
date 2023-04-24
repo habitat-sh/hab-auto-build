@@ -4,8 +4,6 @@ use std::{
     path::PathBuf,
 };
 
-
-
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +12,7 @@ use crate::{
         ContextRules, LeveledSourceCheckViolation, SourceCheck, SourceCheckViolation,
         SourceRuleOptions, ViolationLevel,
     },
-    core::{ArtifactContext, Blake3, PlanContext, SourceContext},
+    core::{ArtifactContext, Blake3, PackageSha256Sum, PlanContext, SourceContext},
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,37 +51,50 @@ pub(crate) enum LicenseRuleOptions {
 pub(crate) struct MissingLicense {
     pub license: String,
     pub sources: BTreeSet<PathBuf>,
-    pub license_files_hash: Blake3,
+    pub source_shasum: Option<PackageSha256Sum>,
 }
 
 impl Display for MissingLicense {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Found license '{}' in files with computed license-files-hash='{}':\n{}",
-            self.license.yellow(),
-            self.license_files_hash.blue(),
-            self.sources
-                .iter()
-                .map(|p| format!("                  - {}", p.display().blue()))
-                .collect::<Vec<String>>()
-                .join("\n"),
-        )
+        if let Some(source_shasum) = &self.source_shasum {
+            write!(
+                f,
+                "Found license '{}' in files with source-shasum='{}':\n{}",
+                self.license.yellow(),
+                source_shasum.blue(),
+                self.sources
+                    .iter()
+                    .map(|p| format!("                  - {}", p.display().blue()))
+                    .collect::<Vec<String>>()
+                    .join("\n"),
+            )
+        } else {
+            write!(
+                f,
+                "Found license '{}' in files:\n{}",
+                self.license.yellow(),
+                self.sources
+                    .iter()
+                    .map(|p| format!("                  - {}", p.display().blue()))
+                    .collect::<Vec<String>>()
+                    .join("\n"),
+            )
+        }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingLicenseOptions {
     pub level: ViolationLevel,
-    #[serde(default, rename = "license-files-hash")]
-    pub license_files_hash: Option<Blake3>,
+    #[serde(default, rename = "source-shasum")]
+    pub source_shasum: Option<PackageSha256Sum>,
 }
 
 impl Default for MissingLicenseOptions {
     fn default() -> Self {
         Self {
             level: ViolationLevel::Error,
-            license_files_hash: None,
+            source_shasum: None,
         }
     }
 }
@@ -91,32 +102,40 @@ impl Default for MissingLicenseOptions {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct LicenseNotFound {
     pub license: String,
-    pub license_files_hash: Blake3,
+    pub source_shasum: Option<PackageSha256Sum>,
 }
 
 impl Display for LicenseNotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "License '{}' specified in the 'pkg_licenses' not found in source with computed license-files-hash='{}'",
-            self.license.yellow(),
-            self.license_files_hash.blue()
-        )
+        if let Some(source_shasum) = &self.source_shasum {
+            write!(
+                f,
+                "License '{}' specified in the 'pkg_licenses' not found in source with source-shasum='{}'",
+                self.license.yellow(),
+                source_shasum.blue()
+            )
+        } else {
+            write!(
+                f,
+                "License '{}' specified in the 'pkg_licenses' not found in source",
+                self.license.yellow(),
+            )
+        }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct LicenseNotFoundOptions {
     pub level: ViolationLevel,
-    #[serde(default, rename = "license-files-hash")]
-    pub license_files_hash: Option<Blake3>,
+    #[serde(default, rename = "source-shasum")]
+    pub source_shasum: Option<PackageSha256Sum>,
 }
 
 impl Default for LicenseNotFoundOptions {
     fn default() -> Self {
         Self {
             level: ViolationLevel::Error,
-            license_files_hash: None,
+            source_shasum: None,
         }
     }
 }
@@ -233,7 +252,10 @@ impl LicenseCheck {
                                     format!("{}+", id.name)
                                 }
                             }
-                            spdx::LicenseItem::Other { doc_ref: _, lic_ref } => {
+                            spdx::LicenseItem::Other {
+                                doc_ref: _,
+                                lic_ref,
+                            } => {
                                 format!("{}", lic_ref)
                             }
                         };
@@ -274,19 +296,23 @@ impl LicenseCheck {
         let missing_licenses = detected_licenses.difference(&specified_licenses);
         for missing_license in missing_licenses {
             violations.push(LeveledSourceCheckViolation {
-                level: match &missing_license_options.license_files_hash {
-                    Some(license_files_hash)
-                        if source_context.license_files_hash == *license_files_hash =>
+                level: match (
+                    &source_context.source_shasum,
+                    &missing_license_options.source_shasum,
+                ) {
+                    (Some(source_shasum), Some(options_source_shasum))
+                        if source_shasum == options_source_shasum =>
                     {
                         missing_license_options.level
                     }
+                    (None, _) => missing_license_options.level,
                     _ => ViolationLevel::Error,
                 },
                 violation: SourceCheckViolation::License(LicenseRule::MissingLicense(
                     MissingLicense {
                         sources: license_sources.remove(missing_license).unwrap(),
                         license: missing_license.clone(),
-                        license_files_hash: source_context.license_files_hash.clone(),
+                        source_shasum: source_context.source_shasum.clone(),
                     },
                 )),
             });
@@ -295,18 +321,22 @@ impl LicenseCheck {
         let licenses_not_found = specified_licenses.difference(&detected_licenses);
         for license_not_found in licenses_not_found {
             violations.push(LeveledSourceCheckViolation {
-                level: match &license_not_found_options.license_files_hash {
-                    Some(license_files_hash)
-                        if source_context.license_files_hash == *license_files_hash =>
+                level: match (
+                    &source_context.source_shasum,
+                    &license_not_found_options.source_shasum,
+                ) {
+                    (Some(source_shasum), Some(options_source_shasum))
+                        if source_shasum == options_source_shasum =>
                     {
                         license_not_found_options.level
                     }
+                    (None, _) => license_not_found_options.level,
                     _ => ViolationLevel::Error,
                 },
                 violation: SourceCheckViolation::License(LicenseRule::LicenseNotFound(
                     LicenseNotFound {
                         license: license_not_found.clone(),
-                        license_files_hash: source_context.license_files_hash.clone(),
+                        source_shasum: source_context.source_shasum.clone(),
                     },
                 )),
             });

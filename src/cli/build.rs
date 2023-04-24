@@ -36,7 +36,7 @@ pub(crate) struct Params {
     #[arg(short = 'd', long)]
     dry_run: bool,
     /// Level of checks to perform
-    #[arg(value_enum, short = 'c', long, default_value_t = CheckLevel::Strict)]
+    #[arg(value_enum, short = 'l', long, default_value_t = CheckLevel::Strict)]
     check_level: CheckLevel,
     /// List of packages to build
     packages: Vec<PackageDepGlob>,
@@ -70,6 +70,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     } else {
         let mut all_checks_passed = true;
         for step in build_plan.check_steps {
+            let mut step_check_passed = true;
             match step.dependency {
                 Dependency::ResolvedDep(resolved_dep) => {
                     info!(target: "user-ui", "{} [remote] {}", "     Checking".green().bold(), resolved_dep);
@@ -109,7 +110,8 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                             .count();
                         match args.check_level {
                             CheckLevel::AllowWarnings if source_errors + artifact_errors > 0 => {
-                                all_checks_passed = false
+                                all_checks_passed = false;
+                                step_check_passed = false;
                             }
                             CheckLevel::Strict
                                 if source_errors
@@ -118,11 +120,12 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                                     + artifact_warnings
                                     > 0 =>
                             {
-                                all_checks_passed = false
+                                all_checks_passed = false;
+                                step_check_passed = false;
                             }
                             _ => {}
                         };
-                        if !all_checks_passed {
+                        if !step_check_passed {
                             match step.dependency {
                                 Dependency::ResolvedDep(resolved_dep) => {
                                     info!(target: "user-ui", "{} [remote] {}", "Check Failure".red().bold(), resolved_dep);
@@ -191,6 +194,11 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                         false,
                         false,
                     )?;
+                    if !all_checks_passed {
+                        info!(target: "user-ui", "{} [{}] {}", "Build Failure".red().bold(), step.studio, step.plan_ctx.id);
+                        info!(target: "user-ui", "{}: Found issues with the package, you should fix them before building", "error".bold().red());
+                        return Ok(());
+                    }
                 }
                 DownloadStatus::MissingSource(_) => {}
                 DownloadStatus::NoSource => {

@@ -6,16 +6,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{AutoBuildContextPath, PlanContextPath};
+use super::{AutoBuildContextPath, PlanContextPath, GlobSetExpression};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RepoConfig {
     pub id: String,
     pub source: PathBuf,
     #[serde(default)]
-    pub native_packages: Vec<String>,
+    pub native_packages: GlobSetExpression,
     #[serde(default)]
-    pub ignored_packages: Vec<String>,
+    pub ignored_packages: GlobSetExpression,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Serialize, Deserialize)]
@@ -59,9 +59,9 @@ pub(crate) struct RepoContext {
     pub id: RepoContextID,
     pub path: RepoContextPath,
     #[serde(skip)]
-    pub ignore_globset: GlobSet,
+    pub ignore_globset: GlobSetExpression,
     #[serde(skip)]
-    pub native_globset: GlobSet,
+    pub native_globset: GlobSetExpression,
 }
 
 impl RepoContext {
@@ -69,18 +69,6 @@ impl RepoContext {
         config: &RepoConfig,
         auto_build_ctx_path: &AutoBuildContextPath,
     ) -> Result<RepoContext> {
-        let mut ignore_globset_builder = GlobSetBuilder::new();
-        let mut native_globset_builder = GlobSetBuilder::new();
-        for pattern in config.ignored_packages.iter() {
-            ignore_globset_builder.add(Glob::new(pattern).with_context(|| {
-                format!("Invalid glob pattern '{}' in 'ignored_packages'", pattern)
-            })?);
-        }
-        for pattern in config.native_packages.iter() {
-            native_globset_builder.add(Glob::new(pattern).with_context(|| {
-                format!("Invalid glob pattern '{}' in 'native_packages'", pattern)
-            })?);
-        }
         Ok(RepoContext {
             id: RepoContextID(config.id.clone()),
             path: if config.source.is_absolute() {
@@ -91,8 +79,8 @@ impl RepoContext {
                     .join(config.source.as_path())
                     .try_into()?
             },
-            ignore_globset: ignore_globset_builder.build()?,
-            native_globset: native_globset_builder.build()?,
+            ignore_globset: config.ignored_packages.clone(),
+            native_globset: config.native_packages.clone(),
         })
     }
 

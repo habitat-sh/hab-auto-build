@@ -525,7 +525,7 @@ impl AutoBuildContext {
                         let source_ctx = if let Some(existing_source_ctx) = existing_source_ctx {
                             existing_source_ctx
                         } else {
-                            let new_source_ctx = SourceContext::read_from_disk(source_archive_path)
+                            let new_source_ctx = SourceContext::read_from_disk(source_archive_path, Some(source.shasum.clone()))
                                 .map_err(DownloadError::UnexpectedError)?;
                             self.store
                                 .get_connection()
@@ -580,7 +580,7 @@ impl AutoBuildContext {
                         .map_err(DownloadError::UnexpectedIOError)?;
                     std::fs::rename(temp_file_path.as_path(), source_archive_path.as_ref())
                         .map_err(DownloadError::UnexpectedIOError)?;
-                    let source_ctx = SourceContext::read_from_disk(source_archive_path)
+                    let source_ctx = SourceContext::read_from_disk(source_archive_path, Some(source.shasum.clone()))
                         .map_err(DownloadError::UnexpectedError)?;
                     self.store
                         .get_connection()

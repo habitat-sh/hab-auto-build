@@ -630,38 +630,26 @@ impl ArtifactContext {
     /// has the executable permission set.
     pub fn search_runtime_executable(
         &self,
+        tdeps: &HashMap<PackageIdent, ArtifactContext>,
         executable_name: impl AsRef<Path>,
     ) -> Option<ExecutableMetadata<'_>> {
         for path in self.runtime_path.iter() {
             let executable_path = path.join(executable_name.as_ref());
-
-            if let Some(metadata) = self.elfs.get(&executable_path) {
-                if metadata.is_executable {
-                    return Some(ExecutableMetadata::Elf(metadata));
+            let resolved_executable_path = if let Some(executable_package_ident) =
+                executable_path.package_ident(self.target)
+            {
+                if let Some(tdep) = tdeps.get(&executable_package_ident) {
+                    tdep.resolve_path(tdeps, executable_path)
+                } else {
+                    continue;
                 }
-            }
-            if let Some(metadata) = self.scripts.get(&executable_path) {
-                if metadata.is_executable {
-                    return Some(ExecutableMetadata::Script(metadata));
-                }
-            }
-        }
-        None
-    }
-
-    /// Search for an executable with the given name.
-    /// This function returns a result regardless of it's
-    /// executable permission bit.
-    pub fn search_runtime(
-        &self,
-        executable_name: impl AsRef<Path>,
-    ) -> Option<ExecutableMetadata<'_>> {
-        for path in self.runtime_path.iter() {
-            let executable_path = path.join(executable_name.as_ref());
-            if let Some(metadata) = self.elfs.get(&executable_path) {
+            } else {
+                continue;
+            };
+            if let Some(metadata) = self.elfs.get(&resolved_executable_path) {
                 return Some(ExecutableMetadata::Elf(metadata));
             }
-            if let Some(metadata) = self.scripts.get(&executable_path) {
+            if let Some(metadata) = self.scripts.get(&resolved_executable_path) {
                 return Some(ExecutableMetadata::Script(metadata));
             }
         }
@@ -748,6 +736,15 @@ impl ArtifactContext {
 pub(crate) enum ExecutableMetadata<'a> {
     Elf(&'a ElfMetadata),
     Script(&'a ScriptMetadata),
+}
+
+impl<'a> ExecutableMetadata<'a> {
+    pub fn is_executable(&self) -> bool {
+        match self {
+            ExecutableMetadata::Elf(metadata) => metadata.is_executable,
+            ExecutableMetadata::Script(metadata) => metadata.is_executable,
+        }
+    }
 }
 
 pub(crate) struct ArtifactIndexer<'a> {

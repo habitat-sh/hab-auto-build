@@ -1,10 +1,11 @@
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, BTreeSet, HashMap},
     ffi::OsString,
     fmt::Display,
     path::PathBuf,
 };
 
+use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -12,7 +13,9 @@ use crate::{
         ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, ContextRules,
         LeveledArtifactCheckViolation, ViolationLevel,
     },
-    core::{ArtifactCache, ArtifactContext, PackageIdent, PackagePath},
+    core::{
+        ArtifactCache, ArtifactContext, PackageDepGlob, PackageDepIdent, PackageIdent, PackagePath,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,7 +85,7 @@ impl Display for BadRuntimePathEntry {
         write!(
             f,
             "The runtime path entry {} does not belong to a habitat package",
-            self.entry.display()
+            self.entry.display().yellow()
         )
     }
 }
@@ -108,7 +111,7 @@ pub(crate) struct MissingRuntimePathEntryDependency {
 
 impl Display for MissingRuntimePathEntryDependency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "The runtime path entry {} belongs to {} which is not a runtime dependency of this package", self.entry.display(), self.dep_ident)
+        write!(f, "The runtime path entry {} belongs to {} which is not a runtime dependency of this package", self.entry.display().yellow(), self.dep_ident.yellow())
     }
 }
 
@@ -135,7 +138,7 @@ impl Display for MissingDependencyArtifact {
         write!(
             f,
             "Could not find an artifact for {} required by this package",
-            self.dep_ident
+            self.dep_ident.yellow()
         )
     }
 }
@@ -163,7 +166,7 @@ impl Display for DuplicateDependency {
         write!(
             f,
             "The package {} is specified as both a 'dep' and 'build_dep' for this package",
-            self.dep_ident
+            self.dep_ident.yellow()
         )
     }
 }
@@ -191,7 +194,7 @@ impl Display for EmptyTopLevelDirectory {
         write!(
             f,
             "The top level directory {} does not contain any files",
-            self.directory.display()
+            self.directory.display().yellow()
         )
     }
 }
@@ -220,8 +223,12 @@ impl Display for BrokenLink {
         write!(
             f,
             "{}: The symlink points to {} which does not exist",
-            self.entry.relative_package_path().unwrap().display(),
-            self.link.display()
+            self.entry
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.link.display().yellow()
         )
     }
 }
@@ -249,20 +256,30 @@ impl Display for UnusedDependency {
         write!(
             f,
             "The package {} does not seem to be used at runtime",
-            self.dep_ident,
+            self.dep_ident.yellow(),
         )
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct UnusedDependencyOptions {
+    #[serde(default = "UnusedDependencyOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_packages: BTreeSet<PackageDepGlob>,
+}
+
+impl UnusedDependencyOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Warn
+    }
 }
 
 impl Default for UnusedDependencyOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Warn,
+            level: Self::level(),
+            ignored_packages: BTreeSet::default(),
         }
     }
 }
@@ -278,22 +295,37 @@ impl Display for DuplicateRuntimeBinary {
         write!(
             f,
             "Duplicate binary {} available at {}, it was first found at {}",
-            self.primary_binary.file_name().unwrap().to_str().unwrap(),
-            self.primary_binary.display(),
-            self.duplicate_binary.display()
+            self.primary_binary
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .yellow(),
+            self.duplicate_binary.display().blue(),
+            self.primary_binary.display().blue(),
         )
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct DuplicateRuntimeBinaryOptions {
+    #[serde(default = "DuplicateRuntimeBinaryOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub primary_packages: BTreeSet<PackageDepGlob>,
+}
+
+impl DuplicateRuntimeBinaryOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Warn
+    }
 }
 
 impl Default for DuplicateRuntimeBinaryOptions {
     fn default() -> Self {
         Self {
             level: ViolationLevel::Warn,
+            primary_packages: BTreeSet::default(),
         }
     }
 }
@@ -502,6 +534,24 @@ impl ArtifactCheck for PackageBeforeCheck {
                                     {
                                         Entry::Occupied(entry) => {
                                             if entry.get() != elf_path {
+                                                // If the resolved executable is from a specified primary package,
+                                                // we allow it and don't create a violation
+                                                if duplicate_runtime_binary_options
+                                                    .primary_packages
+                                                    .iter()
+                                                    .any(|dep_ident| {
+                                                        entry
+                                                            .get()
+                                                            .package_ident(artifact_ctx.target)
+                                                            .map_or(false, |ident| {
+                                                                dep_ident
+                                                                    .matcher()
+                                                                    .matches_package_ident(&ident)
+                                                            })
+                                                    })
+                                                {
+                                                    continue;
+                                                }
                                                 violations.push(LeveledArtifactCheckViolation {
                                                     level: duplicate_runtime_binary_options.level,
                                                     violation: ArtifactCheckViolation::Package(
@@ -531,6 +581,24 @@ impl ArtifactCheck for PackageBeforeCheck {
                                     {
                                         Entry::Occupied(entry) => {
                                             if entry.get() != script_path {
+                                                // If the resolved executable is from a specified primary package,
+                                                // we allow it and don't create a violation
+                                                if duplicate_runtime_binary_options
+                                                    .primary_packages
+                                                    .iter()
+                                                    .any(|dep_ident| {
+                                                        entry
+                                                            .get()
+                                                            .package_ident(artifact_ctx.target)
+                                                            .map_or(false, |ident| {
+                                                                dep_ident
+                                                                    .matcher()
+                                                                    .matches_package_ident(&ident)
+                                                            })
+                                                    })
+                                                {
+                                                    continue;
+                                                }
                                                 violations.push(LeveledArtifactCheckViolation {
                                                     level: duplicate_runtime_binary_options.level,
                                                     violation: ArtifactCheckViolation::Package(
@@ -616,6 +684,13 @@ impl ArtifactCheck for PackageAfterCheck {
         let unused_deps = checker_context.unused_deps.as_ref().unwrap();
         if !unused_deps.is_empty() {
             for unused_dep in unused_deps {
+                if unused_dependency_options
+                    .ignored_packages
+                    .iter()
+                    .any(|dep_ident| dep_ident.matcher().matches_package_ident(unused_dep))
+                {
+                    continue;
+                }
                 violations.push(LeveledArtifactCheckViolation {
                     level: unused_dependency_options.level,
                     violation: ArtifactCheckViolation::Package(PackageRule::UnusedDependency(

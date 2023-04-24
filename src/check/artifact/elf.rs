@@ -1,15 +1,16 @@
 use std::{collections::HashSet, fmt::Display, path::PathBuf};
 
 use owo_colors::OwoColorize;
+use path_absolutize::Absolutize;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::{
     check::{
         ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, ContextRules,
         LeveledArtifactCheckViolation, ViolationLevel,
     },
-    core::{ArtifactCache, ArtifactContext, ElfType, PackageIdent, PackagePath},
+    core::{ArtifactCache, ArtifactContext, ElfType, GlobSetExpression, PackageIdent, PackagePath},
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,10 +20,14 @@ pub(crate) enum ElfRule {
     MissingRPathEntryDependency(MissingRPathEntryDependency),
     #[serde(rename = "bad-rpath-entry")]
     BadRPathEntry(BadRPathEntry),
+    #[serde(rename = "unused-rpath-entry")]
+    UnusedRPathEntry(UnusedRPathEntry),
     #[serde(rename = "missing-runpath-entry-dependency")]
     MissingRunPathEntryDependency(MissingRunPathEntryDependency),
     #[serde(rename = "bad-runpath-entry")]
     BadRunPathEntry(BadRunPathEntry),
+    #[serde(rename = "unused-runpath-entry")]
+    UnusedRunPathEntry(UnusedRunPathEntry),
     #[serde(rename = "library-dependency-not-found")]
     LibraryDependencyNotFound(LibraryDependencyNotFound),
     #[serde(rename = "bad-library-dependency")]
@@ -44,8 +49,10 @@ impl Display for ElfRule {
         match self {
             ElfRule::MissingRPathEntryDependency(rule) => write!(f, "{}", rule),
             ElfRule::BadRPathEntry(rule) => write!(f, "{}", rule),
+            ElfRule::UnusedRPathEntry(rule) => write!(f, "{}", rule),
             ElfRule::MissingRunPathEntryDependency(rule) => write!(f, "{}", rule),
             ElfRule::BadRunPathEntry(rule) => write!(f, "{}", rule),
+            ElfRule::UnusedRunPathEntry(rule) => write!(f, "{}", rule),
             ElfRule::LibraryDependencyNotFound(rule) => write!(f, "{}", rule),
             ElfRule::BadLibraryDependency(rule) => write!(f, "{}", rule),
             ElfRule::BadELFInterpreter(rule) => write!(f, "{}", rule),
@@ -64,10 +71,14 @@ pub(crate) enum ElfRuleOptions {
     MissingRPathEntryDependency(MissingRPathEntryDependencyOptions),
     #[serde(rename = "bad-rpath-entry")]
     BadRPathEntry(BadRPathEntryOptions),
+    #[serde(rename = "unused-rpath-entry")]
+    UnusedRPathEntry(UnusedRPathEntryOptions),
     #[serde(rename = "missing-runpath-entry-dependency")]
     MissingRunPathEntryDependency(MissingRunPathEntryDependencyOptions),
     #[serde(rename = "bad-runpath-entry")]
     BadRunPathEntry(BadRunPathEntryOptions),
+    #[serde(rename = "unused-runpath-entry")]
+    UnusedRunPathEntry(UnusedRunPathEntryOptions),
     #[serde(rename = "library-dependency-not-found")]
     LibraryDependencyNotFound(LibraryDependencyNotFoundOptions),
     #[serde(rename = "bad-library-dependency")]
@@ -99,13 +110,23 @@ impl Display for MissingRPathEntryDependency {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingRPathEntryDependencyOptions {
+    #[serde(default = "MissingRPathEntryDependencyOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl MissingRPathEntryDependencyOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for MissingRPathEntryDependencyOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -133,13 +154,70 @@ impl Display for BadRPathEntry {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct BadRPathEntryOptions {
+    #[serde(default = "BadRPathEntryOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl BadRPathEntryOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for BadRPathEntryOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct UnusedRPathEntry {
+    pub source: PathBuf,
+    pub entry: PathBuf,
+}
+
+impl Display for UnusedRPathEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The rpath entry {} does not contain any required shared library",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.entry.display().yellow()
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct UnusedRPathEntryOptions {
+    #[serde(default = "UnusedRPathEntryOptions::level")]
+    pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+    #[serde(default)]
+    pub ignored_entries: GlobSetExpression,
+}
+
+impl UnusedRPathEntryOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
+}
+
+impl Default for UnusedRPathEntryOptions {
+    fn default() -> Self {
+        Self {
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
+            ignored_entries: GlobSetExpression::default(),
         }
     }
 }
@@ -159,13 +237,23 @@ impl Display for MissingRunPathEntryDependency {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingRunPathEntryDependencyOptions {
+    #[serde(default = "MissingRunPathEntryDependencyOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl MissingRunPathEntryDependencyOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for MissingRunPathEntryDependencyOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -193,13 +281,70 @@ impl Display for BadRunPathEntry {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct BadRunPathEntryOptions {
+    #[serde(default = "BadRunPathEntryOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl BadRunPathEntryOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for BadRunPathEntryOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct UnusedRunPathEntry {
+    pub source: PathBuf,
+    pub entry: PathBuf,
+}
+
+impl Display for UnusedRunPathEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: The runpath entry {} does not contain any required shared library",
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.entry.display().yellow()
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct UnusedRunPathEntryOptions {
+    #[serde(default = "UnusedRunPathEntryOptions::level")]
+    pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+    #[serde(default)]
+    pub ignored_entries: GlobSetExpression,
+}
+
+impl UnusedRunPathEntryOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
+}
+
+impl Default for UnusedRunPathEntryOptions {
+    fn default() -> Self {
+        Self {
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
+            ignored_entries: GlobSetExpression::default(),
         }
     }
 }
@@ -227,13 +372,23 @@ impl Display for LibraryDependencyNotFound {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct LibraryDependencyNotFoundOptions {
+    #[serde(default = "LibraryDependencyNotFoundOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl LibraryDependencyNotFoundOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for LibraryDependencyNotFoundOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -265,13 +420,23 @@ impl Display for BadLibraryDependency {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct BadLibraryDependencyOptions {
+    #[serde(default = "BadLibraryDependencyOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl BadLibraryDependencyOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for BadLibraryDependencyOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -297,13 +462,23 @@ impl Display for MissingELFInterpreter {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingELFInterpreterOptions {
+    #[serde(default = "MissingELFInterpreterOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl MissingELFInterpreterOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for MissingELFInterpreterOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -331,13 +506,23 @@ impl Display for BadELFInterpreter {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct BadELFInterpreterOptions {
+    #[serde(default = "BadELFInterpreterOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl BadELFInterpreterOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for BadELFInterpreterOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -365,13 +550,23 @@ impl Display for HostELFInterpreter {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct HostELFInterpreterOptions {
+    #[serde(default = "HostELFInterpreterOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl HostELFInterpreterOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for HostELFInterpreterOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -401,13 +596,23 @@ impl Display for ELFInterpreterNotFound {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ELFInterpreterNotFoundOptions {
+    #[serde(default = "ELFInterpreterNotFoundOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl ELFInterpreterNotFoundOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for ELFInterpreterNotFoundOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -427,13 +632,23 @@ impl Display for MissingELFInterpreterDependency {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingELFInterpreterDependencyOptions {
+    #[serde(default = "MissingELFInterpreterDependencyOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl MissingELFInterpreterDependencyOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for MissingELFInterpreterDependencyOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -452,13 +667,23 @@ impl Display for UnexpectedELFInterpreter {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct UnexpectedELFInterpreterOptions {
+    #[serde(default = "UnexpectedELFInterpreterOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl UnexpectedELFInterpreterOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for UnexpectedELFInterpreterOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -511,6 +736,21 @@ impl ArtifactCheck for ElfCheck {
             .last()
             .expect("Default rule missing");
 
+        let unused_rpath_entry_options = rules
+            .artifact_rules
+            .iter()
+            .filter_map(|rule| {
+                if let ArtifactRuleOptions::Elf(ElfRuleOptions::UnusedRPathEntry(options)) =
+                    &rule.options
+                {
+                    Some(options)
+                } else {
+                    None
+                }
+            })
+            .last()
+            .expect("Default rule missing");
+
         let missing_runpath_entry_dependency_options = rules
             .artifact_rules
             .iter()
@@ -532,6 +772,21 @@ impl ArtifactCheck for ElfCheck {
             .iter()
             .filter_map(|rule| {
                 if let ArtifactRuleOptions::Elf(ElfRuleOptions::BadRunPathEntry(options)) =
+                    &rule.options
+                {
+                    Some(options)
+                } else {
+                    None
+                }
+            })
+            .last()
+            .expect("Default rule missing");
+
+        let unused_runpath_entry_options = rules
+            .artifact_rules
+            .iter()
+            .filter_map(|rule| {
+                if let ArtifactRuleOptions::Elf(ElfRuleOptions::UnusedRunPathEntry(options)) =
                     &rule.options
                 {
                     Some(options)
@@ -690,6 +945,9 @@ impl ArtifactCheck for ElfCheck {
                                                     a.elfs.get(&resolved_interpreter_path)
                                                 })
                                                 .is_none()
+                                                && !elf_interpreter_not_found_options
+                                                    .ignored_files
+                                                    .is_match(path.relative_package_path().unwrap())
                                             {
                                                 violations.push(LeveledArtifactCheckViolation {
                                                     level: elf_interpreter_not_found_options.level,
@@ -708,7 +966,10 @@ impl ArtifactCheck for ElfCheck {
                                             } else {
                                                 used_deps.insert(interpreter_dep.clone());
                                             }
-                                        } else {
+                                        } else if !elf_interpreter_not_found_options
+                                            .ignored_files
+                                            .is_match(path.relative_package_path().unwrap())
+                                        {
                                             violations.push(LeveledArtifactCheckViolation {
                                                 level: elf_interpreter_not_found_options.level,
                                                 violation: ArtifactCheckViolation::Elf(
@@ -725,7 +986,10 @@ impl ArtifactCheck for ElfCheck {
                                     } else {
                                         used_deps.insert(interpreter_dep);
                                     }
-                                } else {
+                                } else if !missing_elf_interpreter_dependency_options
+                                    .ignored_files
+                                    .is_match(path.relative_package_path().unwrap())
+                                {
                                     violations.push(LeveledArtifactCheckViolation {
                                         level: missing_elf_interpreter_dependency_options.level,
                                         violation: ArtifactCheckViolation::Elf(
@@ -739,7 +1003,10 @@ impl ArtifactCheck for ElfCheck {
                                         ),
                                     });
                                 }
-                            } else {
+                            } else if !host_elf_interpreter_options
+                                .ignored_files
+                                .is_match(path.relative_package_path().unwrap())
+                            {
                                 violations.push(LeveledArtifactCheckViolation {
                                     level: host_elf_interpreter_options.level,
                                     violation: ArtifactCheckViolation::Elf(
@@ -750,7 +1017,10 @@ impl ArtifactCheck for ElfCheck {
                                     ),
                                 });
                             }
-                        } else {
+                        } else if !bad_elf_interpreter_options
+                            .ignored_files
+                            .is_match(path.relative_package_path().unwrap())
+                        {
                             violations.push(LeveledArtifactCheckViolation {
                                 level: bad_elf_interpreter_options.level,
                                 violation: ArtifactCheckViolation::Elf(ElfRule::BadELFInterpreter(
@@ -764,20 +1034,37 @@ impl ArtifactCheck for ElfCheck {
                     }
                 }
                 ElfType::SharedLibrary | ElfType::Relocatable | ElfType::Other => {
-                    if let Some(interpreter_path) = metadata.interpreter.as_ref() {
-                        violations.push(LeveledArtifactCheckViolation {
-                            level: unexpected_elf_interpreter_options.level,
-                            violation: ArtifactCheckViolation::Elf(
-                                ElfRule::UnexpectedELFInterpreter(UnexpectedELFInterpreter {
-                                    source: path.clone(),
-                                    interpreter: interpreter_path.to_path_buf(),
-                                }),
-                            ),
-                        });
+                    if !unexpected_elf_interpreter_options
+                        .ignored_files
+                        .is_match(path.relative_package_path().unwrap())
+                    {
+                        if let Some(interpreter_path) = metadata.interpreter.as_ref() {
+                            violations.push(LeveledArtifactCheckViolation {
+                                level: unexpected_elf_interpreter_options.level,
+                                violation: ArtifactCheckViolation::Elf(
+                                    ElfRule::UnexpectedELFInterpreter(UnexpectedELFInterpreter {
+                                        source: path.clone(),
+                                        interpreter: interpreter_path.to_path_buf(),
+                                    }),
+                                ),
+                            });
+                        }
                     }
                 }
             }
 
+            let mut unused_rpath_entries = metadata
+                .rpath
+                .iter()
+                .map(|p| p.absolutize())
+                .collect::<Result<HashSet<_>, _>>()
+                .unwrap();
+            let mut unused_runpath_entries = metadata
+                .runpath
+                .iter()
+                .map(|p| p.absolutize())
+                .collect::<Result<HashSet<_>, _>>()
+                .unwrap();
             for library in metadata.required_libraries.iter() {
                 let mut found = false;
                 // If the library is the interpreter skip it
@@ -786,7 +1073,9 @@ impl ArtifactCheck for ElfCheck {
                         continue;
                     }
                 }
+
                 for search_path in metadata.rpath.iter() {
+                    let search_path = search_path.absolutize().unwrap();
                     if let Some(dep_ident) = search_path.package_ident(artifact_context.target) {
                         if let Some(artifact) = tdep_artifacts.get(&dep_ident) {
                             let library_path = search_path.join(library);
@@ -815,6 +1104,13 @@ impl ArtifactCheck for ElfCheck {
                                 match metadata.elf_type {
                                     ElfType::SharedLibrary | ElfType::Relocatable => {
                                         found = true;
+                                        trace!(
+                                            "Found library {} required by {} in rpath entry {}",
+                                            library,
+                                            path.display(),
+                                            search_path.display()
+                                        );
+                                        unused_rpath_entries.remove(&search_path);
                                         used_deps.insert(artifact.id.clone());
                                         break;
                                     }
@@ -822,45 +1118,63 @@ impl ArtifactCheck for ElfCheck {
                                     | ElfType::PieExecutable
                                     | ElfType::Other => {
                                         found = true;
+                                        trace!(
+                                            "Found library {} required by {} in rpath entry {}",
+                                            library,
+                                            path.display(),
+                                            search_path.display()
+                                        );
+                                        unused_rpath_entries.remove(&search_path);
                                         used_deps.insert(artifact.id.clone());
-                                        violations.push(LeveledArtifactCheckViolation {
-                                            level: bad_library_dependency_options.level,
-                                            violation: ArtifactCheckViolation::Elf(
-                                                ElfRule::BadLibraryDependency(
-                                                    BadLibraryDependency {
-                                                        source: path.clone(),
-                                                        library: library.clone(),
-                                                        library_path,
-                                                        elf_type: metadata.elf_type,
-                                                    },
+                                        if !bad_library_dependency_options
+                                            .ignored_files
+                                            .is_match(path.relative_package_path().unwrap())
+                                        {
+                                            violations.push(LeveledArtifactCheckViolation {
+                                                level: bad_library_dependency_options.level,
+                                                violation: ArtifactCheckViolation::Elf(
+                                                    ElfRule::BadLibraryDependency(
+                                                        BadLibraryDependency {
+                                                            source: path.clone(),
+                                                            library: library.clone(),
+                                                            library_path,
+                                                            elf_type: metadata.elf_type,
+                                                        },
+                                                    ),
                                                 ),
-                                            ),
-                                        });
+                                            });
+                                        }
                                         break;
                                     }
                                 }
                             }
-                        } else {
+                        } else if !missing_rpath_entry_dependency_options
+                            .ignored_files
+                            .is_match(path.relative_package_path().unwrap())
+                        {
                             violations.push(LeveledArtifactCheckViolation {
                                 level: missing_rpath_entry_dependency_options.level,
                                 violation: ArtifactCheckViolation::Elf(
                                     ElfRule::MissingRPathEntryDependency(
                                         MissingRPathEntryDependency {
                                             source: path.clone(),
-                                            entry: search_path.clone(),
+                                            entry: search_path.to_path_buf(),
                                             dep_ident: dep_ident.clone(),
                                         },
                                     ),
                                 ),
                             });
                         }
-                    } else {
+                    } else if !bad_rpath_entry_options
+                        .ignored_files
+                        .is_match(path.relative_package_path().unwrap())
+                    {
                         violations.push(LeveledArtifactCheckViolation {
                             level: bad_rpath_entry_options.level,
                             violation: ArtifactCheckViolation::Elf(ElfRule::BadRPathEntry(
                                 BadRPathEntry {
                                     source: path.clone(),
-                                    entry: search_path.clone(),
+                                    entry: search_path.to_path_buf(),
                                 },
                             )),
                         });
@@ -868,6 +1182,7 @@ impl ArtifactCheck for ElfCheck {
                 }
 
                 for search_path in metadata.runpath.iter() {
+                    let search_path = search_path.absolutize().unwrap();
                     if let Some(dep_ident) = search_path.package_ident(artifact_context.target) {
                         if let Some(artifact) = tdep_artifacts.get(&dep_ident) {
                             let library_path = search_path.join(library);
@@ -896,6 +1211,13 @@ impl ArtifactCheck for ElfCheck {
                                 match metadata.elf_type {
                                     ElfType::SharedLibrary | ElfType::Relocatable => {
                                         found = true;
+                                        trace!(
+                                            "Found library {} required by {} in runpath entry {}",
+                                            library,
+                                            path.display(),
+                                            search_path.display()
+                                        );
+                                        unused_runpath_entries.remove(&search_path);
                                         used_deps.insert(artifact.id.clone());
                                         break;
                                     }
@@ -903,52 +1225,74 @@ impl ArtifactCheck for ElfCheck {
                                     | ElfType::PieExecutable
                                     | ElfType::Other => {
                                         found = true;
+                                        trace!(
+                                            "Found library {} required by {} in runpath entry {}",
+                                            library,
+                                            path.display(),
+                                            search_path.display()
+                                        );
+                                        unused_runpath_entries.remove(&search_path);
                                         used_deps.insert(artifact.id.clone());
-                                        violations.push(LeveledArtifactCheckViolation {
-                                            level: bad_library_dependency_options.level,
-                                            violation: ArtifactCheckViolation::Elf(
-                                                ElfRule::BadLibraryDependency(
-                                                    BadLibraryDependency {
-                                                        source: path.clone(),
-                                                        library: library.clone(),
-                                                        library_path,
-                                                        elf_type: metadata.elf_type,
-                                                    },
+                                        if !bad_library_dependency_options
+                                            .ignored_files
+                                            .is_match(path.relative_package_path().unwrap())
+                                        {
+                                            violations.push(LeveledArtifactCheckViolation {
+                                                level: bad_library_dependency_options.level,
+                                                violation: ArtifactCheckViolation::Elf(
+                                                    ElfRule::BadLibraryDependency(
+                                                        BadLibraryDependency {
+                                                            source: path.clone(),
+                                                            library: library.clone(),
+                                                            library_path,
+                                                            elf_type: metadata.elf_type,
+                                                        },
+                                                    ),
                                                 ),
-                                            ),
-                                        });
+                                            });
+                                        }
                                         break;
                                     }
                                 }
                             }
-                        } else {
+                        } else if !missing_runpath_entry_dependency_options
+                            .ignored_files
+                            .is_match(path.relative_package_path().unwrap())
+                        {
                             violations.push(LeveledArtifactCheckViolation {
                                 level: missing_runpath_entry_dependency_options.level,
                                 violation: ArtifactCheckViolation::Elf(
                                     ElfRule::MissingRunPathEntryDependency(
                                         MissingRunPathEntryDependency {
                                             source: path.clone(),
-                                            entry: search_path.clone(),
+                                            entry: search_path.to_path_buf(),
                                             dep_ident: dep_ident.clone(),
                                         },
                                     ),
                                 ),
                             });
                         }
-                    } else {
+                    } else if !bad_runpath_entry_options
+                        .ignored_files
+                        .is_match(path.relative_package_path().unwrap())
+                    {
                         violations.push(LeveledArtifactCheckViolation {
                             level: bad_runpath_entry_options.level,
                             violation: ArtifactCheckViolation::Elf(ElfRule::BadRunPathEntry(
                                 BadRunPathEntry {
                                     source: path.clone(),
-                                    entry: search_path.clone(),
+                                    entry: search_path.to_path_buf(),
                                 },
                             )),
                         });
                     }
                 }
 
-                if !found {
+                if !found
+                    && !library_dependency_not_found_options
+                        .ignored_files
+                        .is_match(path.relative_package_path().unwrap())
+                {
                     violations.push(LeveledArtifactCheckViolation {
                         level: library_dependency_not_found_options.level,
                         violation: ArtifactCheckViolation::Elf(ElfRule::LibraryDependencyNotFound(
@@ -958,6 +1302,44 @@ impl ArtifactCheck for ElfCheck {
                             },
                         )),
                     });
+                }
+            }
+            if !unused_rpath_entries.is_empty()
+                && !unused_rpath_entry_options
+                    .ignored_files
+                    .is_match(path.relative_package_path().unwrap())
+            {
+                for entry in unused_rpath_entries.iter() {
+                    if !unused_rpath_entry_options.ignored_entries.is_match(entry) {
+                        violations.push(LeveledArtifactCheckViolation {
+                            level: unused_rpath_entry_options.level,
+                            violation: ArtifactCheckViolation::Elf(ElfRule::UnusedRPathEntry(
+                                UnusedRPathEntry {
+                                    source: path.clone(),
+                                    entry: entry.to_path_buf(),
+                                },
+                            )),
+                        });
+                    }
+                }
+            }
+            if !unused_runpath_entries.is_empty()
+                && !unused_runpath_entry_options
+                    .ignored_files
+                    .is_match(path.relative_package_path().unwrap())
+            {
+                for entry in unused_runpath_entries.iter() {
+                    if !unused_runpath_entry_options.ignored_entries.is_match(entry) {
+                        violations.push(LeveledArtifactCheckViolation {
+                            level: unused_runpath_entry_options.level,
+                            violation: ArtifactCheckViolation::Elf(ElfRule::UnusedRunPathEntry(
+                                UnusedRunPathEntry {
+                                    source: path.clone(),
+                                    entry: entry.to_path_buf(),
+                                },
+                            )),
+                        });
+                    }
                 }
             }
         }

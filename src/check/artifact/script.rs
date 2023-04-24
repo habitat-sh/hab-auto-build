@@ -1,5 +1,10 @@
-use std::{collections::HashSet, fmt::Display, path::PathBuf};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt::Display,
+    path::PathBuf,
+};
 
+use owo_colors::OwoColorize;
 use path_absolutize::Absolutize;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
@@ -9,7 +14,7 @@ use crate::{
         ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, ContextRules,
         LeveledArtifactCheckViolation, ViolationLevel,
     },
-    core::{ArtifactCache, ArtifactContext, PackageIdent, PackagePath},
+    core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackageIdent, PackagePath},
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,21 +75,35 @@ impl Display for HostScriptInterpreter {
         write!(
             f,
             "{}: The interpreter {} does not belong to a habitat package",
-            self.source.relative_package_path().unwrap().display(),
-            self.interpreter.display()
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.interpreter.display().yellow()
         )
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct HostScriptInterpreterOptions {
+    #[serde(default = "HostScriptInterpreterOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl HostScriptInterpreterOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for HostScriptInterpreterOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -100,21 +119,33 @@ impl Display for MissingEnvScriptInterpreter {
         write!(
             f,
             "{}: The 'env' command must have atleast 1 argument, found '{}'",
-            self.source.relative_package_path().unwrap().display(),
-            self.raw_interpreter
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.raw_interpreter.yellow()
         )
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingEnvScriptInterpreterOptions {
+    #[serde(default = "MissingEnvScriptInterpreterOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
 }
-
+impl MissingEnvScriptInterpreterOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
+}
 impl Default for MissingEnvScriptInterpreterOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -130,21 +161,35 @@ impl Display for EnvScriptInterpreterNotFound {
         write!(
             f,
             "{}: The interpreter command '{}' could not be found in the runtime environment",
-            self.source.relative_package_path().unwrap().display(),
-            self.interpreter.display()
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.interpreter.display().yellow()
         )
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct EnvScriptInterpreterNotFoundOptions {
+    #[serde(default = "EnvScriptInterpreterNotFoundOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl EnvScriptInterpreterNotFoundOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for EnvScriptInterpreterNotFoundOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -161,22 +206,36 @@ impl Display for ScriptInterpreterNotFound {
         write!(
             f,
             "{}: The interpreter command '{}' could not be found in {}",
-            self.source.relative_package_path().unwrap().display(),
-            self.interpreter.display(),
-            self.interpreter_dependency
+            self.source
+                .relative_package_path()
+                .unwrap()
+                .display()
+                .white(),
+            self.interpreter.display().yellow(),
+            self.interpreter_dependency.yellow()
         )
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ScriptInterpreterNotFoundOptions {
+    #[serde(default = "ScriptInterpreterNotFoundOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl ScriptInterpreterNotFoundOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for ScriptInterpreterNotFoundOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -193,22 +252,32 @@ impl Display for MissingScriptInterpreterDependency {
         write!(
             f,
             "{}: The interpreter command '{}' belongs to {} which is not a runtime dependency of this package",
-            self.source.relative_package_path().unwrap().display(),
-            self.interpreter.display(),
-            self.interpreter_dependency
+            self.source.relative_package_path().unwrap().display().white(),
+            self.interpreter.display().yellow(),
+            self.interpreter_dependency.yellow()
         )
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct MissingScriptInterpreterDependencyOptions {
+    #[serde(default = "MissingScriptInterpreterDependencyOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl MissingScriptInterpreterDependencyOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Error
+    }
 }
 
 impl Default for MissingScriptInterpreterDependencyOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Error,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -227,18 +296,22 @@ impl Display for UnlistedScriptInterpreter {
             write!(
                 f,
                 "{}: The interpreter command '{}' is not listed as an interpreter in {}",
-                self.source.relative_package_path().unwrap().display(),
-                self.interpreter.display(),
-                self.interpreter_dependency
+                self.source
+                    .relative_package_path()
+                    .unwrap()
+                    .display()
+                    .white(),
+                self.interpreter.display().yellow(),
+                self.interpreter_dependency.yellow()
             )
         } else {
             write!(
                 f,
                 "{}: The interpreter command '{}' is not listed as an interpreter in {}, available interpreters are: {:?}",
-                self.source.relative_package_path().unwrap().display(),
-                self.interpreter.display(),
-                self.interpreter_dependency,
-                self.listed_interpreters
+                self.source.relative_package_path().unwrap().display().white(),
+                self.interpreter.display().yellow(),
+                self.interpreter_dependency.yellow(),
+                self.listed_interpreters.blue()
             )
         }
     }
@@ -246,13 +319,23 @@ impl Display for UnlistedScriptInterpreter {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct UnlistedScriptInterpreterOptions {
+    #[serde(default = "UnlistedScriptInterpreterOptions::level")]
     pub level: ViolationLevel,
+    #[serde(default)]
+    pub ignored_files: GlobSetExpression,
+}
+
+impl UnlistedScriptInterpreterOptions {
+    fn level() -> ViolationLevel {
+        ViolationLevel::Warn
+    }
 }
 
 impl Default for UnlistedScriptInterpreterOptions {
     fn default() -> Self {
         Self {
-            level: ViolationLevel::Warn,
+            level: Self::level(),
+            ignored_files: GlobSetExpression::default(),
         }
     }
 }
@@ -423,19 +506,23 @@ impl ArtifactCheck for ScriptCheck {
                     // TODO: Handle case where command is symlinked
                     if let Some(command) = metadata.interpreter.args.first() {
                         let mut found = false;
+                        let mut is_executable = false;
                         for runtime_artifact_ctx in
                             checker_context.runtime_artifacts.as_ref().unwrap().iter()
                         {
-                            if runtime_artifact_ctx
-                                .search_runtime_executable(command)
-                                .is_some()
+                            if let Some(metadata) = runtime_artifact_ctx
+                                .search_runtime_executable(tdep_artifacts, command)
                             {
-                                found = true;
+                                found = metadata.is_executable();
                                 used_deps.insert(runtime_artifact_ctx.id.clone());
                                 break;
                             }
                         }
-                        if !found {
+                        if !found
+                            && !env_script_interpreter_not_found_options
+                                .ignored_files
+                                .is_match(path.relative_package_path().unwrap())
+                        {
                             violations.push(LeveledArtifactCheckViolation {
                                 level: env_script_interpreter_not_found_options.level,
                                 violation: ArtifactCheckViolation::Script(
@@ -449,17 +536,22 @@ impl ArtifactCheck for ScriptCheck {
                             });
                         }
                     } else {
-                        violations.push(LeveledArtifactCheckViolation {
-                            level: missing_env_script_interpreter_options.level,
-                            violation: ArtifactCheckViolation::Script(
-                                ScriptRule::MissingEnvScriptInterpreter(
-                                    MissingEnvScriptInterpreter {
-                                        source: path.clone(),
-                                        raw_interpreter: metadata.interpreter.raw.clone(),
-                                    },
+                        if !missing_env_script_interpreter_options
+                            .ignored_files
+                            .is_match(path.relative_package_path().unwrap())
+                        {
+                            violations.push(LeveledArtifactCheckViolation {
+                                level: missing_env_script_interpreter_options.level,
+                                violation: ArtifactCheckViolation::Script(
+                                    ScriptRule::MissingEnvScriptInterpreter(
+                                        MissingEnvScriptInterpreter {
+                                            source: path.clone(),
+                                            raw_interpreter: metadata.interpreter.raw.clone(),
+                                        },
+                                    ),
                                 ),
-                            ),
-                        });
+                            });
+                        }
                     }
                 } else if let Some(interpreter_artifact_ctx) = tdep_artifacts.get(&interpreter_dep)
                 {
@@ -473,7 +565,11 @@ impl ArtifactCheck for ScriptCheck {
                             .get(command.as_path())
                             .is_some()
                     {
-                        if !interpreter_artifact_ctx.interpreters.contains(&command) {
+                        if !interpreter_artifact_ctx.interpreters.contains(&command)
+                            && !unlisted_script_interpreter_options
+                                .ignored_files
+                                .is_match(path.relative_package_path().unwrap())
+                        {
                             violations.push(LeveledArtifactCheckViolation {
                                 level: unlisted_script_interpreter_options.level,
                                 violation: ArtifactCheckViolation::Script(
@@ -490,7 +586,10 @@ impl ArtifactCheck for ScriptCheck {
                                 ),
                             });
                         }
-                    } else {
+                    } else if !script_interpreter_not_found_options
+                        .ignored_files
+                        .is_match(path.relative_package_path().unwrap())
+                    {
                         violations.push(LeveledArtifactCheckViolation {
                             level: script_interpreter_not_found_options.level,
                             violation: ArtifactCheckViolation::Script(
@@ -502,7 +601,10 @@ impl ArtifactCheck for ScriptCheck {
                             ),
                         });
                     }
-                } else {
+                } else if !missing_env_script_interpreter_options
+                    .ignored_files
+                    .is_match(path.relative_package_path().unwrap())
+                {
                     violations.push(LeveledArtifactCheckViolation {
                         level: missing_script_interpreter_dependency_options.level,
                         violation: ArtifactCheckViolation::Script(
@@ -516,7 +618,11 @@ impl ArtifactCheck for ScriptCheck {
                         ),
                     });
                 }
-            } else if !self.platform_interpreter_paths.contains(&command) {
+            } else if !self.platform_interpreter_paths.contains(&command)
+                && !host_script_interpreter_options
+                    .ignored_files
+                    .is_match(path.relative_package_path().unwrap())
+            {
                 violations.push(LeveledArtifactCheckViolation {
                     level: host_script_interpreter_options.level,
                     violation: ArtifactCheckViolation::Script(ScriptRule::HostScriptInterpreter(
@@ -532,8 +638,6 @@ impl ArtifactCheck for ScriptCheck {
             checker_context.mark_used(&used_dep);
         }
 
-        violations
-            .into_iter()
-            .collect()
+        violations.into_iter().collect()
     }
 }

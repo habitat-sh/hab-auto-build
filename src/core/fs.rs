@@ -1,4 +1,5 @@
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, Context};
+use globset::{Glob, GlobSetBuilder};
 use infer::Infer;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -180,5 +181,45 @@ impl AsRef<Path> for HabitatRootPath {
 pub mod file_types {
     pub fn script_matcher(buf: &[u8]) -> bool {
         return buf.len() >= 2 && buf[0] == 0x23 && buf[1] == 0x21;
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct GlobSetExpression {
+    pub patterns: Vec<String>,
+    globset: globset::GlobSet,
+}
+
+impl Default for GlobSetExpression {
+    fn default() -> Self {
+        Self { patterns: Default::default(), globset: Default::default() }
+    }
+}
+
+impl GlobSetExpression {
+    pub fn is_match(&self, path: impl AsRef<Path>) -> bool {
+        self.globset.is_match(path)
+    }
+}
+
+impl TryFrom<Vec<String>> for GlobSetExpression {
+    type Error = color_eyre::eyre::Error;
+
+    fn try_from(patterns: Vec<String>) -> Result<Self, Self::Error> {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns.iter() {
+            builder.add(Glob::new(pattern).with_context(|| {
+                format!("Invalid glob pattern '{}' in 'ignored_packages'", pattern)
+            })?);
+        }
+        let globset = builder.build()?;
+        Ok(GlobSetExpression { patterns, globset })
+    }
+}
+
+impl Into<Vec<String>> for GlobSetExpression {
+    fn into(self) -> Vec<String> {
+        self.patterns
     }
 }

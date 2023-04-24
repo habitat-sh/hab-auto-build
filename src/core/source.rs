@@ -13,10 +13,10 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
-use tracing::error;
+use tracing::{error, trace};
 use xz2::bufread::XzDecoder;
 
-use super::{Blake3, FileKind};
+use super::{Blake3, FileKind, PackageSha256Sum};
 
 const LICENSE_GLOBS: &[&str] = &[
     // General
@@ -40,9 +40,21 @@ const LICENSE_GLOBS: &[&str] = &[
     "UNLICEN[CS]E",
     "UNLICEN[CS]E[.-]*",
     // GPL (gpl.txt, etc.)
+    // Other license-specific (APACHE-2.0.txt, etc.)
     "agpl[.-]*",
     "gpl[.-]*",
     "lgpl[.-]*",
+    "AGPL-*[0-9]*",
+    "APACHE-*[0-9]*",
+    "BSD-*[0-9]*",
+    "CC-BY-*",
+    "GFDL-*[0-9]*",
+    "GNU-*[0-9]*",
+    "GPL-*[0-9]*",
+    "LGPL-*[0-9]*",
+    "MIT-*[0-9]*",
+    "MPL-*[0-9]*",
+    "OFL-*[0-9]*",
 ];
 const LICENSE_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/license-cache.bin.gz"));
 
@@ -61,7 +73,12 @@ lazy_static! {
         }
         for license in LICENSE_STORE.licenses() {
             builder.add(
-                GlobBuilder::new(format!("**/{}*", license).as_str())
+                GlobBuilder::new(format!("**/{}", license).as_str())
+                    .literal_separator(true)
+                    .build().unwrap()
+            );
+            builder.add(
+                GlobBuilder::new(format!("**/{}.txt", license).as_str())
                     .literal_separator(true)
                     .build().unwrap()
             );
@@ -74,11 +91,14 @@ lazy_static! {
 pub(crate) struct SourceContext {
     pub format: (FileKind, Option<FileKind>),
     pub licenses: BTreeSet<SourceLicenseContext>,
-    pub license_files_hash: Blake3,
+    pub source_shasum: Option<PackageSha256Sum>,
 }
 
 impl SourceContext {
-    pub fn read_from_disk(path: impl AsRef<Path>) -> Result<SourceContext> {
+    pub fn read_from_disk(
+        path: impl AsRef<Path>,
+        source_download_shasum: Option<PackageSha256Sum>,
+    ) -> Result<SourceContext> {
         let file_type = FileKind::detect_from_path(path.as_ref())?;
         let file = BufReader::new(File::open(path.as_ref())?);
         let format;
@@ -95,6 +115,7 @@ impl SourceContext {
                     licenses = SourceContext::read_licenses_from_archive(Archive::new(decoder))?;
                 } else {
                     format = (file_type, None);
+                    todo!()
                 }
             }
             FileKind::Gzip => {
@@ -104,6 +125,8 @@ impl SourceContext {
                     licenses = SourceContext::read_licenses_from_archive(Archive::new(decoder))?;
                 } else {
                     format = (file_type, None);
+                    let decoder = GzDecoder::new(BufReader::new(File::open(path.as_ref())?));
+                    licenses = SourceContext::read_licenses_from_archive(Archive::new(decoder))?;
                 }
             }
             FileKind::Lzip => {
@@ -117,6 +140,7 @@ impl SourceContext {
                 }
                 _ => {
                     format = (file_type, None);
+                    todo!()
                 }
             },
             FileKind::Compress => todo!(),
@@ -131,6 +155,7 @@ impl SourceContext {
                     licenses = SourceContext::read_licenses_from_archive(Archive::new(decoder))?;
                 } else {
                     format = (file_type, None);
+                    todo!()
                 }
             }
             FileKind::Elf | FileKind::Script | FileKind::Other => {
@@ -141,9 +166,8 @@ impl SourceContext {
 
         Ok(SourceContext {
             format,
-            license_files_hash: Blake3::hash_value(&licenses)
-                .context("Failed to hash source context licenses")?,
             licenses,
+            source_shasum: source_download_shasum,
         })
     }
 
@@ -157,17 +181,16 @@ impl SourceContext {
         let strategy = ScanStrategy::new(&*LICENSE_STORE)
             .confidence_threshold(0.8)
             .mode(ScanMode::TopDown)
+            .shallow_limit(0.98)
             .max_passes(50)
             .optimize(true);
         for entry in tar.entries()? {
             let mut entry = entry?;
             let path = entry.path()?.to_path_buf();
             if LICENSE_GLOBSET.is_match(path.as_path()) {
+                trace!("Scanning file {} for licenses", path.display());
                 let mut text = String::new();
                 if entry.read_to_string(&mut text).is_ok() {
-                    if text.is_empty() {
-                        panic!("Empty");
-                    }
                     let data = TextData::from(text.clone());
                     let mut detected_licenses = BTreeSet::new();
                     if let Ok(results) = strategy.scan(&data) {
@@ -175,6 +198,11 @@ impl SourceContext {
                             detected_licenses.insert(item.license.name.to_string());
                         }
                     }
+                    trace!(
+                        "Including license file {} in source context, with detected licenses: {:?}",
+                        path.display(),
+                        detected_licenses
+                    );
                     licenses.insert(SourceLicenseContext {
                         path,
                         text,
