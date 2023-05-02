@@ -16,7 +16,7 @@ cargo install --path .
 
 To configure `hab-auto-build`, you need to create a JSON file with the following structure, which allows the tool to locate and manage plans:
 
-```json
+```jsonc
 {
     // Multiple repositories can be specified, each containing plans.
     // hab-auto-build will automatically detect cross-repo plan dependencies
