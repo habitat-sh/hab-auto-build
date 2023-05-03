@@ -908,132 +908,8 @@ impl ArtifactCheck for ElfCheck {
             // Check the interpreter
             let mut interpreter_name = None;
 
-            match metadata.elf_type {
-                ElfType::Executable | ElfType::PieExecutable => {
-                    if let Some(interpreter_path) = metadata.interpreter.as_ref() {
-                        if let Some(file_name) =
-                            interpreter_path.file_name().and_then(|x| x.to_str())
-                        {
-                            interpreter_name = Some(file_name.to_string());
-                            if let Some(interpreter_dep) =
-                                interpreter_path.package_ident(artifact_context.target)
-                            {
-                                if let Some(interpreter_artifact_ctx) =
-                                    tdep_artifacts.get(&interpreter_dep)
-                                {
-                                    if interpreter_artifact_ctx
-                                        .elfs
-                                        .get(interpreter_path.as_path())
-                                        .is_none()
-                                    {
-                                        let resolved_interpreter_path = interpreter_artifact_ctx
-                                            .resolve_path(
-                                                tdep_artifacts,
-                                                interpreter_path.as_path(),
-                                            );
-                                        if resolved_interpreter_path != *interpreter_path {
-                                            debug!(
-                                                "In {}, following elf interpreter path: {} -> {}",
-                                                path.display(),
-                                                interpreter_path.display(),
-                                                resolved_interpreter_path.display()
-                                            );
-                                            if resolved_interpreter_path
-                                                .package_ident(interpreter_artifact_ctx.target)
-                                                .and_then(|p| tdep_artifacts.get(&p))
-                                                .and_then(|a| {
-                                                    a.elfs.get(&resolved_interpreter_path)
-                                                })
-                                                .is_none()
-                                                && !elf_interpreter_not_found_options
-                                                    .ignored_files
-                                                    .is_match(path.relative_package_path().unwrap())
-                                            {
-                                                violations.push(LeveledArtifactCheckViolation {
-                                                    level: elf_interpreter_not_found_options.level,
-                                                    violation: ArtifactCheckViolation::Elf(
-                                                        ElfRule::ELFInterpreterNotFound(
-                                                            ELFInterpreterNotFound {
-                                                                source: path.clone(),
-                                                                interpreter: interpreter_path
-                                                                    .clone(),
-                                                                interpreter_dependency:
-                                                                    interpreter_dep,
-                                                            },
-                                                        ),
-                                                    ),
-                                                });
-                                            } else {
-                                                used_deps.insert(interpreter_dep.clone());
-                                            }
-                                        } else if !elf_interpreter_not_found_options
-                                            .ignored_files
-                                            .is_match(path.relative_package_path().unwrap())
-                                        {
-                                            violations.push(LeveledArtifactCheckViolation {
-                                                level: elf_interpreter_not_found_options.level,
-                                                violation: ArtifactCheckViolation::Elf(
-                                                    ElfRule::ELFInterpreterNotFound(
-                                                        ELFInterpreterNotFound {
-                                                            source: path.clone(),
-                                                            interpreter: interpreter_path.clone(),
-                                                            interpreter_dependency: interpreter_dep,
-                                                        },
-                                                    ),
-                                                ),
-                                            });
-                                        }
-                                    } else {
-                                        used_deps.insert(interpreter_dep);
-                                    }
-                                } else if !missing_elf_interpreter_dependency_options
-                                    .ignored_files
-                                    .is_match(path.relative_package_path().unwrap())
-                                {
-                                    violations.push(LeveledArtifactCheckViolation {
-                                        level: missing_elf_interpreter_dependency_options.level,
-                                        violation: ArtifactCheckViolation::Elf(
-                                            ElfRule::MissingELFInterpreterDependency(
-                                                MissingELFInterpreterDependency {
-                                                    source: path.clone(),
-                                                    interpreter: interpreter_path.clone(),
-                                                    interpreter_dependency: interpreter_dep,
-                                                },
-                                            ),
-                                        ),
-                                    });
-                                }
-                            } else if !host_elf_interpreter_options
-                                .ignored_files
-                                .is_match(path.relative_package_path().unwrap())
-                            {
-                                violations.push(LeveledArtifactCheckViolation {
-                                    level: host_elf_interpreter_options.level,
-                                    violation: ArtifactCheckViolation::Elf(
-                                        ElfRule::HostELFInterpreter(HostELFInterpreter {
-                                            source: path.clone(),
-                                            interpreter: interpreter_path.clone(),
-                                        }),
-                                    ),
-                                });
-                            }
-                        } else if !bad_elf_interpreter_options
-                            .ignored_files
-                            .is_match(path.relative_package_path().unwrap())
-                        {
-                            violations.push(LeveledArtifactCheckViolation {
-                                level: bad_elf_interpreter_options.level,
-                                violation: ArtifactCheckViolation::Elf(ElfRule::BadELFInterpreter(
-                                    BadELFInterpreter {
-                                        source: path.clone(),
-                                        interpreter: interpreter_path.to_path_buf(),
-                                    },
-                                )),
-                            });
-                        }
-                    }
-                }
-                ElfType::SharedLibrary | ElfType::Relocatable | ElfType::Other => {
+            if let Some(interpreter_path) = metadata.interpreter.as_ref() {
+                if !metadata.is_executable {
                     if !unexpected_elf_interpreter_options
                         .ignored_files
                         .is_match(path.relative_package_path().unwrap())
@@ -1050,6 +926,126 @@ impl ArtifactCheck for ElfCheck {
                             });
                         }
                     }
+                }
+                if let Some(file_name) =
+                    interpreter_path.file_name().and_then(|x| x.to_str())
+                {
+                    interpreter_name = Some(file_name.to_string());
+                    if let Some(interpreter_dep) =
+                        interpreter_path.package_ident(artifact_context.target)
+                    {
+                        if let Some(interpreter_artifact_ctx) =
+                            tdep_artifacts.get(&interpreter_dep)
+                        {
+                            if interpreter_artifact_ctx
+                                .elfs
+                                .get(interpreter_path.as_path())
+                                .is_none()
+                            {
+                                let resolved_interpreter_path = interpreter_artifact_ctx
+                                    .resolve_path(
+                                        tdep_artifacts,
+                                        interpreter_path.as_path(),
+                                    );
+                                if resolved_interpreter_path != *interpreter_path {
+                                    debug!(
+                                        "In {}, following elf interpreter path: {} -> {}",
+                                        path.display(),
+                                        interpreter_path.display(),
+                                        resolved_interpreter_path.display()
+                                    );
+                                    if resolved_interpreter_path
+                                        .package_ident(interpreter_artifact_ctx.target)
+                                        .and_then(|p| tdep_artifacts.get(&p))
+                                        .and_then(|a| {
+                                            a.elfs.get(&resolved_interpreter_path)
+                                        })
+                                        .is_none()
+                                        && !elf_interpreter_not_found_options
+                                            .ignored_files
+                                            .is_match(path.relative_package_path().unwrap())
+                                    {
+                                        violations.push(LeveledArtifactCheckViolation {
+                                            level: elf_interpreter_not_found_options.level,
+                                            violation: ArtifactCheckViolation::Elf(
+                                                ElfRule::ELFInterpreterNotFound(
+                                                    ELFInterpreterNotFound {
+                                                        source: path.clone(),
+                                                        interpreter: interpreter_path
+                                                            .clone(),
+                                                        interpreter_dependency:
+                                                            interpreter_dep,
+                                                    },
+                                                ),
+                                            ),
+                                        });
+                                    } else {
+                                        used_deps.insert(interpreter_dep.clone());
+                                    }
+                                } else if !elf_interpreter_not_found_options
+                                    .ignored_files
+                                    .is_match(path.relative_package_path().unwrap())
+                                {
+                                    violations.push(LeveledArtifactCheckViolation {
+                                        level: elf_interpreter_not_found_options.level,
+                                        violation: ArtifactCheckViolation::Elf(
+                                            ElfRule::ELFInterpreterNotFound(
+                                                ELFInterpreterNotFound {
+                                                    source: path.clone(),
+                                                    interpreter: interpreter_path.clone(),
+                                                    interpreter_dependency: interpreter_dep,
+                                                },
+                                            ),
+                                        ),
+                                    });
+                                }
+                            } else {
+                                used_deps.insert(interpreter_dep);
+                            }
+                        } else if !missing_elf_interpreter_dependency_options
+                            .ignored_files
+                            .is_match(path.relative_package_path().unwrap())
+                        {
+                            violations.push(LeveledArtifactCheckViolation {
+                                level: missing_elf_interpreter_dependency_options.level,
+                                violation: ArtifactCheckViolation::Elf(
+                                    ElfRule::MissingELFInterpreterDependency(
+                                        MissingELFInterpreterDependency {
+                                            source: path.clone(),
+                                            interpreter: interpreter_path.clone(),
+                                            interpreter_dependency: interpreter_dep,
+                                        },
+                                    ),
+                                ),
+                            });
+                        }
+                    } else if !host_elf_interpreter_options
+                        .ignored_files
+                        .is_match(path.relative_package_path().unwrap())
+                    {
+                        violations.push(LeveledArtifactCheckViolation {
+                            level: host_elf_interpreter_options.level,
+                            violation: ArtifactCheckViolation::Elf(
+                                ElfRule::HostELFInterpreter(HostELFInterpreter {
+                                    source: path.clone(),
+                                    interpreter: interpreter_path.clone(),
+                                }),
+                            ),
+                        });
+                    }
+                } else if !bad_elf_interpreter_options
+                    .ignored_files
+                    .is_match(path.relative_package_path().unwrap())
+                {
+                    violations.push(LeveledArtifactCheckViolation {
+                        level: bad_elf_interpreter_options.level,
+                        violation: ArtifactCheckViolation::Elf(ElfRule::BadELFInterpreter(
+                            BadELFInterpreter {
+                                source: path.clone(),
+                                interpreter: interpreter_path.to_path_buf(),
+                            },
+                        )),
+                    });
                 }
             }
 
