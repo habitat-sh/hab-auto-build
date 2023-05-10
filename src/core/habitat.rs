@@ -1,19 +1,18 @@
-
 use color_eyre::eyre::{eyre, Context, Result};
 use std::{
     env,
     path::{Path, PathBuf},
-    process::{Stdio},
+    process::Stdio,
 };
 use subprocess::{Exec, NullFile, Redirection};
 use tempdir::TempDir;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
-use crate::store::{Store};
+use crate::store::Store;
 
 use super::{
-    ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep,
-    FSRootPath, HabitatRootPath, HabitatSourceCachePath,
+    ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep, FSRootPath,
+    HabitatRootPath, HabitatSourceCachePath,
 };
 
 pub(crate) fn install_artifact(artifact_path: &ArtifactPath) -> Result<()> {
@@ -163,12 +162,18 @@ fn copy_build_failure_output(
     build_output_path: impl AsRef<Path>,
 ) -> Result<()> {
     let pre_build_path = build_output_path.as_ref().join("pre_build.env");
-    let pre_build = std::fs::read_to_string(&pre_build_path).with_context(|| {
+    let pre_build = match std::fs::read_to_string(&pre_build_path).with_context(|| {
         format!(
             "Failed to read pre build file at '{}'",
             pre_build_path.display()
         )
-    })?;
+    }) {
+        Ok(pre_build) => pre_build,
+        Err(err) => {
+            error!("Failed to copy build failure logs: {:?}", err);
+            return Ok(())
+        },
+    };
     let pkg_ident = pre_build
         .lines()
         .into_iter()
