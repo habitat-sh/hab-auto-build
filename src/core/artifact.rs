@@ -381,13 +381,17 @@ impl ArtifactContext {
             if entry_type.is_hard_link() || entry_type.is_symlink() {
                 if let Ok(Some(link_path)) = header.link_name() {
                     let canonical_link_path = if link_path.is_relative() {
-                        entry_install_path
-                            .parent()
-                            .unwrap()
-                            .join(link_path)
-                            .absolutize()
-                            .unwrap()
-                            .to_path_buf()
+                        if entry_type.is_hard_link() {
+                            FSRootPath::default().as_ref().join(link_path)
+                        } else {
+                            entry_install_path
+                                .parent()
+                                .unwrap()
+                                .join(link_path)
+                                .absolutize()
+                                .unwrap()
+                                .to_path_buf()
+                        }
                     } else {
                         link_path.absolutize().unwrap().to_path_buf()
                     };
