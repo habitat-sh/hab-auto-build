@@ -114,8 +114,10 @@ impl SourceContext {
                     format = (file_type, Some(FileKind::Tar));
                     licenses = SourceContext::read_licenses_from_archive(Archive::new(decoder))?;
                 } else {
-                    format = (file_type, None);
-                    todo!()
+                    // We just assume the inner file is a tar
+                    let decoder = BzDecoder::new(BufReader::new(File::open(path.as_ref())?));
+                    format = (file_type, Some(FileKind::Tar));
+                    licenses = SourceContext::read_licenses_from_archive(Archive::new(decoder))?;
                 }
             }
             FileKind::Gzip => {
