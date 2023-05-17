@@ -3,9 +3,8 @@ use crate::core::{BOOTSTRAP_BUILD_STUDIO_PACKAGE, STANDARD_BUILD_STUDIO_PACKAGE}
 use super::{
     ArtifactCache, BuildStudioConfig, PackageBuildIdent, PackageBuildVersion,
     PackageDepGlobMatcher, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
-    PackageRelease, PackageResolvedDepIdent, PackageTarget, PackageVersion,
-    PlanContext, PlanContextFileChange, PlanContextID, PlanContextLatestArtifact, PlanFilePath,
-    RepoContextID,
+    PackageRelease, PackageResolvedDepIdent, PackageTarget, PackageVersion, PlanContext,
+    PlanContextFileChange, PlanContextID, PlanContextLatestArtifact, PlanFilePath, RepoContextID,
 };
 
 use clap::ValueEnum;
@@ -436,11 +435,13 @@ impl DepGraph {
                             }
                         }
                         (false, false) => {
-                            dep_graph.build_graph.add_edge(
-                                dep_node_index,
-                                standard_build_studio_node_index,
-                                DependencyType::Studio,
-                            );
+                            if !plan_ctx.is_native {
+                                dep_graph.build_graph.add_edge(
+                                    dep_node_index,
+                                    standard_build_studio_node_index,
+                                    DependencyType::Studio,
+                                );
+                            }
                         }
                     }
                 }

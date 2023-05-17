@@ -8,7 +8,7 @@ use subprocess::{Exec, NullFile, Redirection};
 use tempdir::TempDir;
 use tracing::{debug, error, trace};
 
-use crate::store::Store;
+use crate::{store::Store, core::PackageTarget};
 
 use super::{
     ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep, FSRootPath,
@@ -263,6 +263,7 @@ pub(crate) fn native_package_build(
         .arg(relative_plan_context)
         .env("HAB_FEAT_NATIVE_PACKAGE_SUPPORT", "1")
         .env("HAB_OUTPUT_PATH", tmp_dir.path())
+        .env("BUILD_PKG_TARGET", PackageTarget::default().to_string())
         .cwd(build_step.repo_ctx.path.as_ref())
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
