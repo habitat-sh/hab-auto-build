@@ -735,6 +735,86 @@ impl ArtifactContext {
         }
         resolved_path
     }
+
+    pub fn resolve_path_and_intermediates(
+        &self,
+        tdeps: &HashMap<PackageIdent, ArtifactContext>,
+        path: impl AsRef<Path>,
+    ) -> (PathBuf, Vec<PathBuf>) {
+        let mut resolved_path = path.as_ref().to_path_buf();
+        let mut intermediate_paths = vec![resolved_path.clone()];
+        let mut current_artifact =
+            if let Some(next_artifact_ctx) = resolved_path.package_ident(self.target) {
+                tdeps.get(&next_artifact_ctx)
+            } else {
+                None
+            };
+        while let Some(artifact_ctx) = current_artifact {
+            if let Some(link) = artifact_ctx.links.get(resolved_path.as_path()) {
+                let link = if link.is_absolute() {
+                    link.to_path_buf()
+                } else {
+                    resolved_path
+                        .parent()
+                        .unwrap()
+                        .join(link)
+                        .absolutize()
+                        .unwrap()
+                        .to_path_buf()
+                };
+                if let Some(next_artifact_ctx) = link.package_ident(artifact_ctx.target) {
+                    if next_artifact_ctx == artifact_ctx.id
+                        && artifact_ctx.links.get(&link).is_none()
+                    {
+                        resolved_path = link.to_path_buf();
+                        intermediate_paths.push(resolved_path.clone());
+                        current_artifact = None;
+                    } else {
+                        current_artifact = tdeps.get(&next_artifact_ctx);
+                        resolved_path = link.to_path_buf();
+                        intermediate_paths.push(resolved_path.clone());
+                    }
+                }
+            } else {
+                let mut current_parent = resolved_path.parent();
+                let mut is_in_symlinked_dir = false;
+                while let Some(parent) = current_parent {
+                    if let Some(parent_link) = artifact_ctx.links.get(parent) {
+                        let parent_link = if parent_link.is_absolute() {
+                            parent_link.to_path_buf()
+                        } else {
+                            parent
+                                .parent()
+                                .unwrap()
+                                .join(parent_link)
+                                .absolutize()
+                                .unwrap()
+                                .to_path_buf()
+                        };
+                        resolved_path =
+                            parent_link.join(resolved_path.strip_prefix(parent).unwrap());
+                        intermediate_paths.push(resolved_path.clone());
+                        is_in_symlinked_dir = true;
+                        break;
+                    } else {
+                        current_parent = parent.parent()
+                    }
+                }
+                if is_in_symlinked_dir {
+                    if let Some(next_artifact_ctx) =
+                        resolved_path.package_ident(artifact_ctx.target)
+                    {
+                        current_artifact = tdeps.get(&next_artifact_ctx);
+                    } else {
+                        current_artifact = None;
+                    }
+                } else {
+                    current_artifact = None;
+                }
+            }
+        }
+        (resolved_path, intermediate_paths)
+    }
 }
 
 pub(crate) enum ExecutableMetadata<'a> {

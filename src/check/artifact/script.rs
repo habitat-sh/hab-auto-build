@@ -491,7 +491,8 @@ impl ArtifactCheck for ScriptCheck {
                     .resolve_path(tdep_artifacts, command.as_path())
                     .display()
             );
-            let command = artifact_context.resolve_path(tdep_artifacts, command);
+            let (command, intermediates) =
+                artifact_context.resolve_path_and_intermediates(tdep_artifacts, command);
 
             if let Some(interpreter_dep) = command.as_path().package_ident(artifact_context.target)
             {
@@ -565,7 +566,16 @@ impl ArtifactCheck for ScriptCheck {
                             .get(command.as_path())
                             .is_some()
                     {
-                        if !interpreter_artifact_ctx.interpreters.contains(&command)
+                        let mut interpreter_listed = false;
+                        for intermediate in intermediates.iter() {
+                            if interpreter_artifact_ctx
+                                .interpreters
+                                .contains(&intermediate)
+                            {
+                                interpreter_listed = true;
+                            }
+                        }
+                        if !interpreter_listed
                             && !unlisted_script_interpreter_options
                                 .ignored_files
                                 .is_match(path.relative_package_path().unwrap())
