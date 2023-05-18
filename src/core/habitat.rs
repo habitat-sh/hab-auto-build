@@ -8,7 +8,7 @@ use subprocess::{Exec, NullFile, Redirection};
 use tempdir::TempDir;
 use tracing::{debug, error, trace};
 
-use crate::{store::Store, core::PackageTarget};
+use crate::{core::PackageTarget, store::Store};
 
 use super::{
     ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep, FSRootPath,
@@ -171,8 +171,8 @@ fn copy_build_failure_output(
         Ok(pre_build) => pre_build,
         Err(err) => {
             error!("Failed to copy build failure logs: {:?}", err);
-            return Ok(())
-        },
+            return Ok(());
+        }
     };
     let pkg_ident = pre_build
         .lines()
@@ -336,12 +336,18 @@ pub(crate) fn bootstrap_package_build(
         .map(|origin| origin.to_string())
         .collect::<Vec<String>>()
         .join(",");
-    let relative_plan_context = build_step
-        .plan_ctx
-        .context_path
-        .as_ref()
-        .strip_prefix(&build_step.repo_ctx.path)
-        .unwrap();
+    let relative_plan_context =
+        if build_step.plan_ctx.context_path.as_ref() == build_step.repo_ctx.path.as_ref() {
+            PathBuf::from(".")
+        } else {
+            build_step
+                .plan_ctx
+                .context_path
+                .as_ref()
+                .strip_prefix(&build_step.repo_ctx.path)
+                .unwrap()
+                .to_path_buf()
+        };
 
     debug!(
         "Starting build of bootstrap package {} with studio package {}, logging output to {}",
@@ -408,6 +414,7 @@ pub(crate) fn bootstrap_package_build(
         .arg(relative_plan_context)
         .env("HAB_ORIGIN_KEYS", origin_keys)
         .env("HAB_LICENSE", "accept-no-persist")
+        .env("HAB_STUDIO_SUP", "false")
         .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
         .env("HAB_STUDIO_SECRET_STUDIO_ENTER", "1")
         .env("HAB_STUDIO_SECRET_HAB_OUTPUT_PATH", "/output")
@@ -483,12 +490,18 @@ pub(crate) fn standard_package_build(
         .map(|origin| origin.to_string())
         .collect::<Vec<String>>()
         .join(",");
-    let relative_plan_context = build_step
-        .plan_ctx
-        .context_path
-        .as_ref()
-        .strip_prefix(&build_step.repo_ctx.path)
-        .unwrap();
+    let relative_plan_context =
+        if build_step.plan_ctx.context_path.as_ref() == build_step.repo_ctx.path.as_ref() {
+            PathBuf::from(".")
+        } else {
+            build_step
+                .plan_ctx
+                .context_path
+                .as_ref()
+                .strip_prefix(&build_step.repo_ctx.path)
+                .unwrap()
+                .to_path_buf()
+        };
 
     debug!(
         "Starting build of standard package {} with studio package {}, logging output to {}",
@@ -554,6 +567,7 @@ pub(crate) fn standard_package_build(
         .env("HAB_ORIGIN_KEYS", origin_keys)
         .env("HAB_LICENSE", "accept-no-persist")
         .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
+        .env("HAB_STUDIO_SUP", "false")
         .env("HAB_STUDIO_SECRET_STUDIO_ENTER", "1")
         .env("HAB_STUDIO_SECRET_HAB_OUTPUT_PATH", "/output")
         .env("HAB_STUDIO_SECRET_NO_INSTALL_DEPS", "1")
