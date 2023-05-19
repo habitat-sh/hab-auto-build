@@ -252,7 +252,7 @@ pub(crate) fn native_package_build(
         build_log_path.display()
     );
 
-    let cmd = Exec::cmd("sudo")
+    let mut cmd = Exec::cmd("sudo")
         .arg("-E")
         .arg("env")
         .arg(format!("PATH={}", env::var("PATH").unwrap_or_default()))
@@ -261,6 +261,7 @@ pub(crate) fn native_package_build(
         .arg("build")
         .arg("-N")
         .arg(relative_plan_context)
+        
         .env("HAB_FEAT_NATIVE_PACKAGE_SUPPORT", "1")
         .env("HAB_OUTPUT_PATH", tmp_dir.path())
         .env("BUILD_PKG_TARGET", PackageTarget::default().to_string())
@@ -268,6 +269,9 @@ pub(crate) fn native_package_build(
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
         .stderr(Redirection::Merge);
+    if !build_step.allow_remote {
+        cmd = cmd.env("HAB_BLDR_URL", "https://non-existent");
+    }
     trace!("Executing command: {:?}", cmd);
     let exit_status = cmd.join()?;
 
@@ -397,7 +401,7 @@ pub(crate) fn bootstrap_package_build(
         &HabitatRootPath::new(FSRootPath::from(studio_root.clone())).source_cache(),
     )?;
 
-    let cmd = Exec::cmd("sudo")
+    let mut cmd = Exec::cmd("sudo")
         .arg("-E")
         .arg("hab")
         .arg("pkg")
@@ -423,6 +427,9 @@ pub(crate) fn bootstrap_package_build(
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
         .stderr(Redirection::Merge);
+    if !build_step.allow_remote {
+        cmd = cmd.env("HAB_BLDR_URL", "https://non-existent");
+    }
     trace!("Executing command: {:?}", cmd);
     let exit_status = cmd.join()?;
     if exit_status.success() {
@@ -551,7 +558,7 @@ pub(crate) fn standard_package_build(
         store,
         &HabitatRootPath::new(FSRootPath::from(studio_root.clone())).source_cache(),
     )?;
-    let cmd = Exec::cmd("sudo")
+    let mut cmd = Exec::cmd("sudo")
         .arg("-E")
         .arg("hab")
         .arg("pkg")
@@ -575,6 +582,9 @@ pub(crate) fn standard_package_build(
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
         .stderr(Redirection::Merge);
+    if !build_step.allow_remote {
+        cmd = cmd.env("HAB_BLDR_URL", "https://non-existent");
+    }
     trace!("Executing command: {:?}", cmd);
     let exit_status = cmd.join()?;
 

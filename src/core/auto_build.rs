@@ -2,13 +2,13 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     fs::File,
-    io::{Read},
+    io::Read,
     path::{Path, PathBuf},
     sync::{mpsc::channel, Arc, RwLock},
     time::Instant,
 };
 
-use chrono::{Duration};
+use chrono::Duration;
 use color_eyre::{
     eyre::{eyre, Context, Result},
     Help,
@@ -34,16 +34,13 @@ use crate::{
         ArtifactCache, ArtifactCachePath, Dependency, DependencyDepth, DependencyDirection,
         DependencyType, PackageSourceDownloadError, SourceContext,
     },
-    store::{
-        self, InvalidPackageSourceArchiveStorePath, Store,
-    },
+    store::{self, InvalidPackageSourceArchiveStorePath, Store},
 };
 
 use super::{
-    habitat, DepGraph, DependencyChangeCause, PackageDepGlob,
-    PackageDepIdent, PackageIdent, PackageOrigin, PackageSha256Sum,
-    PackageSource, PackageTarget, PlanContext, PlanContextID, PlanScannerBuilder, RepoConfig,
-    RepoContext, RepoContextID,
+    habitat, DepGraph, DependencyChangeCause, PackageDepGlob, PackageDepIdent, PackageIdent,
+    PackageOrigin, PackageSha256Sum, PackageSource, PackageTarget, PlanContext, PlanContextID,
+    PlanScannerBuilder, RepoConfig, RepoContext, RepoContextID,
 };
 
 lazy_static! {
@@ -196,6 +193,7 @@ pub(crate) struct BuildStep<'a> {
     pub repo_ctx: &'a RepoContext,
     pub plan_ctx: &'a PlanContext,
     pub studio: BuildStepStudio,
+    pub allow_remote: bool,
     pub studio_package: Option<&'a PackageDepIdent>,
     pub origins: HashSet<PackageOrigin>,
     pub deps_to_install: Vec<&'a PlanContextID>,
@@ -525,8 +523,11 @@ impl AutoBuildContext {
                         let source_ctx = if let Some(existing_source_ctx) = existing_source_ctx {
                             existing_source_ctx
                         } else {
-                            let new_source_ctx = SourceContext::read_from_disk(source_archive_path, Some(source.shasum.clone()))
-                                .map_err(DownloadError::UnexpectedError)?;
+                            let new_source_ctx = SourceContext::read_from_disk(
+                                source_archive_path,
+                                Some(source.shasum.clone()),
+                            )
+                            .map_err(DownloadError::UnexpectedError)?;
                             self.store
                                 .get_connection()
                                 .map_err(DownloadError::UnexpectedError)?
@@ -580,8 +581,11 @@ impl AutoBuildContext {
                         .map_err(DownloadError::UnexpectedIOError)?;
                     std::fs::rename(temp_file_path.as_path(), source_archive_path.as_ref())
                         .map_err(DownloadError::UnexpectedIOError)?;
-                    let source_ctx = SourceContext::read_from_disk(source_archive_path, Some(source.shasum.clone()))
-                        .map_err(DownloadError::UnexpectedError)?;
+                    let source_ctx = SourceContext::read_from_disk(
+                        source_archive_path,
+                        Some(source.shasum.clone()),
+                    )
+                    .map_err(DownloadError::UnexpectedError)?;
                     self.store
                         .get_connection()
                         .map_err(DownloadError::UnexpectedError)?
@@ -896,11 +900,17 @@ impl AutoBuildContext {
         Ok(results)
     }
 
-    pub fn build_plan_generate(&self, package_indices: Vec<NodeIndex>) -> Result<BuildPlan> {
+    pub fn build_plan_generate(
+        &self,
+        package_indices: Vec<NodeIndex>,
+        allow_remote: bool,
+    ) -> Result<BuildPlan> {
         let base_changes_graph = self.dep_graph.detect_changes();
 
-        let mut changes_graph = base_changes_graph
-            .filter_map(|_node_index, node| Some(node), |_edge_index, edge| Some(edge));
+        let mut changes_graph = base_changes_graph.filter_map(
+            |_node_index, node| Some(node),
+            |_edge_index, edge| Some(edge),
+        );
 
         if !package_indices.is_empty() {
             changes_graph = changes_graph.filter_map(
@@ -1021,6 +1031,26 @@ impl AutoBuildContext {
                         let build_duration =
                             store::build_time_get(connection, plan_ctx.id.as_ref())?
                                 .map(|value| Duration::seconds(value.duration_in_secs as i64));
+                        let remote_deps = self
+                            .dep_graph
+                            .get_deps(
+                                Some(node_index).iter(),
+                                [DependencyType::Build, DependencyType::Runtime]
+                                    .into_iter()
+                                    .collect(),
+                                DependencyDepth::Direct,
+                                DependencyDirection::Forward,
+                                false,
+                                false,
+                            )
+                            .into_iter()
+                            .filter_map(|d| match &self.dep_graph.build_graph[d] {
+                                Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {
+                                    Some(&self.dep_graph.build_graph[d])
+                                }
+                                Dependency::LocalPlan(_) => None,
+                            })
+                            .collect::<Vec<_>>();
                         Ok(BuildStep {
                             index: node_index,
                             repo_ctx,
@@ -1029,26 +1059,8 @@ impl AutoBuildContext {
                             studio_package,
                             deps_to_install,
                             origins,
-                            remote_deps: self
-                                .dep_graph
-                                .get_deps(
-                                    Some(node_index).iter(),
-                                    [DependencyType::Build, DependencyType::Runtime]
-                                        .into_iter()
-                                        .collect(),
-                                    DependencyDepth::Direct,
-                                    DependencyDirection::Forward,
-                                    false,
-                                    false,
-                                )
-                                .into_iter()
-                                .filter_map(|d| match &self.dep_graph.build_graph[d] {
-                                    Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {
-                                        Some(&self.dep_graph.build_graph[d])
-                                    }
-                                    Dependency::LocalPlan(_) => None,
-                                })
-                                .collect::<Vec<_>>(),
+                            allow_remote,
+                            remote_deps,
                             causes: changes_graph[node_index].clone(),
                             build_duration,
                         })

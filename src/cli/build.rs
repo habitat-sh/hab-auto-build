@@ -35,6 +35,9 @@ pub(crate) struct Params {
     /// Do a dry run of the build, does not actually build anything
     #[arg(short = 'd', long)]
     dry_run: bool,
+    /// Allow use of packages from a remote habitat builder instance specified by HAB_BLDR_URL
+    #[arg(short = 'r', long)]
+    allow_remote: bool,
     /// Level of checks to perform
     #[arg(value_enum, short = 'l', long, default_value_t = CheckLevel::Strict)]
     check_level: CheckLevel,
@@ -61,7 +64,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         );
         return Ok(());
     }
-    let build_plan = run_context.build_plan_generate(package_indices)?;
+    let build_plan = run_context.build_plan_generate(package_indices, args.allow_remote)?;
     if args.dry_run {
         match args.format {
             OutputFormat::Plain => output_plain(build_plan)?,
