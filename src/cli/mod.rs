@@ -3,6 +3,7 @@ mod analyze;
 mod build;
 mod check;
 mod changes;
+mod compare;
 mod download;
 mod output;
 mod remove;
@@ -30,6 +31,8 @@ enum Commands {
     Check(check::Params),
     /// Check the current list of changes across all repos
     Changes(changes::Params),
+    /// Compare plans across two sets of repos
+    Compare(compare::Params),
     /// Download source archives for specified plans
     Download(download::Params),
     /// Add a plan from the list of changed plans
@@ -47,6 +50,7 @@ impl Cli {
             Commands::Add(args) => add::execute(args),
             Commands::Changes(args) => changes::execute(args),
             Commands::Check(args) => check::execute(args),
+            Commands::Compare(args) => compare::execute(args),
             Commands::Download(args) => download::execute(args),
             Commands::Remove(args) => remove::execute(args),
             Commands::Build(args) => build::execute(args),

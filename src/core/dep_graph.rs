@@ -185,8 +185,8 @@ pub(crate) struct DepGraph {
 impl DepGraph {
     pub fn new(
         build_studio_config: &BuildStudioConfig,
-        _artifact_cache: &ArtifactCache,
         plan_ctxs: HashMap<PlanContextID, PlanContext>,
+        ignore_cycles: bool,
     ) -> Result<DepGraph> {
         let start = Instant::now();
         let mut known_versions: PackageVersionList = PackageVersionList::default();
@@ -293,11 +293,15 @@ impl DepGraph {
             .map(|e| e.id())
             .collect::<Vec<_>>();
         for feedback_edge in feedback_edges.iter() {
-            if let Some((start, end)) = build_graph.edge_endpoints(*feedback_edge) {
-                error!(target: "user-log",
-                    "Build dependency {:?} depends on {:?} which creates a cycle",
-                    build_graph[start], build_graph[end]
-                );
+            if ignore_cycles {
+                build_graph.remove_edge(*feedback_edge);
+            } else {
+                if let Some((start, end)) = build_graph.edge_endpoints(*feedback_edge) {
+                    error!(target: "user-log",
+                        "Build dependency {:?} depends on {:?} which creates a cycle",
+                        build_graph[start], build_graph[end]
+                    );
+                }
             }
         }
 

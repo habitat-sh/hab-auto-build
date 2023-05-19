@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::Display,
     fs::File,
     io::Read,
@@ -20,7 +20,7 @@ use diesel::{
 
 use ignore::WalkBuilder;
 use lazy_static::lazy_static;
-use petgraph::{algo, stable_graph::NodeIndex};
+use petgraph::{algo, stable_graph::NodeIndex, visit::IntoNodeReferences};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, trace};
@@ -38,9 +38,10 @@ use crate::{
 };
 
 use super::{
-    habitat, DepGraph, DependencyChangeCause, PackageDepGlob, PackageDepIdent, PackageIdent,
-    PackageOrigin, PackageSha256Sum, PackageSource, PackageTarget, PlanContext, PlanContextID,
-    PlanScannerBuilder, RepoConfig, RepoContext, RepoContextID,
+    habitat, DepGraph, DependencyChangeCause, PackageBuildVersion, PackageDepGlob, PackageDepIdent,
+    PackageIdent, PackageName, PackageOrigin, PackageSha256Sum, PackageSource, PackageTarget,
+    PackageVersion, PlanContext, PlanContextID, PlanScannerBuilder, RepoConfig, RepoContext,
+    RepoContextID,
 };
 
 lazy_static! {
@@ -70,6 +71,8 @@ impl Default for BuildStudioConfig {
 pub struct AutoBuildConfig {
     #[serde(default)]
     pub studios: BuildStudioConfig,
+    #[serde(default)]
+    pub ignore_cycles: bool,
     pub store: Option<PathBuf>,
     pub repos: Vec<RepoConfig>,
 }
@@ -157,6 +160,12 @@ pub(crate) struct AutoBuildContext {
     repos: HashMap<RepoContextID, RepoContext>,
     dep_graph: DepGraph,
     artifact_cache: Arc<RwLock<ArtifactCache>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PackageDiff {
+    pub source: BTreeSet<PackageBuildVersion>,
+    pub target: BTreeSet<PackageBuildVersion>,
 }
 
 pub(crate) struct DependencyChange<'a> {
@@ -398,7 +407,7 @@ impl AutoBuildContext {
             start.elapsed().as_secs_f32()
         );
 
-        let dep_graph = DepGraph::new(&config.studios, &artifact_cache, plans)?;
+        let dep_graph = DepGraph::new(&config.studios, plans, config.ignore_cycles)?;
 
         Ok(AutoBuildContext {
             path: auto_build_ctx_path,
@@ -483,6 +492,51 @@ impl AutoBuildContext {
                 .transpose()?
                 .map(|mut d| d.pop()),
         })
+    }
+
+    pub fn compare(
+        &self,
+        source: &AutoBuildContext,
+    ) -> HashMap<(PackageTarget, PackageOrigin, PackageName), PackageDiff> {
+        let mut diffs: HashMap<(PackageTarget, PackageOrigin, PackageName), PackageDiff> =
+            HashMap::new();
+        for target_node_index in self.dep_graph.build_graph.node_indices() {
+            let target_node = &self.dep_graph.build_graph[target_node_index];
+            match target_node {
+                Dependency::ResolvedDep(_) => {}
+                Dependency::RemoteDep(_) => {}
+                Dependency::LocalPlan(target_plan) => {
+                    for source_node_index in source.dep_graph.build_graph.node_indices() {
+                        let source_node = &source.dep_graph.build_graph[source_node_index];
+                        match source_node {
+                            Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
+                            Dependency::LocalPlan(source_plan) => {
+                                let target_id = target_plan.id.as_ref();
+                                let source_id = source_plan.id.as_ref();
+                                if target_id.target == source_id.target
+                                    && target_id.origin == source_id.origin
+                                    && target_id.name == source_id.name
+                                {
+                                    let entry = diffs
+                                        .entry((
+                                            target_id.target,
+                                            target_id.origin.clone(),
+                                            target_id.name.clone(),
+                                        ))
+                                        .or_insert_with(|| PackageDiff {
+                                            source: BTreeSet::default(),
+                                            target: BTreeSet::default(),
+                                        });
+                                    entry.source.insert(source_plan.id.as_ref().version.clone());
+                                    entry.target.insert(target_plan.id.as_ref().version.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        diffs
     }
 
     pub fn download_dep_source(
