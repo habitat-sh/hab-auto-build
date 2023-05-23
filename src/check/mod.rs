@@ -8,7 +8,10 @@ use std::{
 
 use crate::core::{ArtifactCache, ArtifactContext, PackageIdent, PlanContext, SourceContext};
 
-use color_eyre::{eyre::{eyre, Result}, Help, SectionExt};
+use color_eyre::{
+    eyre::{eyre, Result},
+    Help, SectionExt,
+};
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use toml_edit::{Array, Document, Formatted, InlineTable, Value};
@@ -22,9 +25,7 @@ use self::{
         package::{PackageAfterCheck, PackageRuleOptions},
         script::{ScriptCheck, ScriptRule, ScriptRuleOptions},
     },
-    source::license::{
-        LicenseCheck, LicenseRule, LicenseRuleOptions,
-    },
+    source::license::{LicenseCheck, LicenseRule, LicenseRuleOptions},
 };
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
@@ -51,20 +52,22 @@ pub(crate) enum RuleConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub(crate) struct ContextRules {
+pub(crate) struct PlanContextConfig {
+    #[serde(default, rename="docker-image")]
+    pub docker_image: Option<String>,
     #[serde(default)]
-    source_rules: Vec<SourceRule>,
+    pub source_rules: Vec<SourceRule>,
     #[serde(default)]
-    artifact_rules: Vec<ArtifactRule>,
+    pub artifact_rules: Vec<ArtifactRule>,
 }
 
-impl ContextRules {
-    pub fn merge(mut self, other: &ContextRules) -> ContextRules {
+impl PlanContextConfig {
+    pub fn merge(mut self, other: &PlanContextConfig) -> PlanContextConfig {
         self.source_rules.extend_from_slice(&other.source_rules);
         self.artifact_rules.extend_from_slice(&other.artifact_rules);
         self
     }
-    pub fn from_str(value: &str) -> Result<ContextRules> {
+    pub fn from_str(value: &str) -> Result<PlanContextConfig> {
         let document = value.parse::<Document>()?;
         let mut restructured_document = Document::new();
         let mut restructured_rules = Array::default();
@@ -108,8 +111,21 @@ impl ContextRules {
         restructured_document.insert("rules", toml_edit::value(restructured_rules));
         let plan_config: PlanConfig = toml_edit::de::from_document(restructured_document.clone())
             .map_err(|err| eyre!("Invalid .hab-plan-config.toml file: {}", err))
-            .with_section(|| restructured_document.to_string().header("Restructured Rules:"))?;
-        let mut context_rules = ContextRules {
+            .with_section(|| {
+                restructured_document
+                    .to_string()
+                    .header("Restructured Rules:")
+            })?;
+        let mut context_rules = PlanContextConfig {
+            docker_image: document
+                .get("docker-image")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or(eyre!("Invalid docker image name"))
+                        .map(String::from)
+                })
+                .transpose()?,
             source_rules: vec![],
             artifact_rules: vec![],
         };
@@ -125,9 +141,10 @@ impl ContextRules {
     }
 }
 
-impl Default for ContextRules {
+impl Default for PlanContextConfig {
     fn default() -> Self {
         Self {
+            docker_image: None,
             source_rules: vec![
                 SourceRule {
                     options: SourceRuleOptions::License(LicenseRuleOptions::MissingLicense(
@@ -140,9 +157,9 @@ impl Default for ContextRules {
                     )),
                 },
                 SourceRule {
-                    options: SourceRuleOptions::License(LicenseRuleOptions::InvalidLicenseExpression(
-                        Default::default(),
-                    )),
+                    options: SourceRuleOptions::License(
+                        LicenseRuleOptions::InvalidLicenseExpression(Default::default()),
+                    ),
                 },
             ],
             artifact_rules: vec![
@@ -431,13 +448,13 @@ impl Display for ArtifactCheckViolation {
 pub(crate) trait SourceCheck {
     fn source_context_check_with_plan(
         &self,
-        rules: &ContextRules,
+        plan_config: &PlanContextConfig,
         plan_context: &PlanContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation>;
     fn source_context_check_with_artifact(
         &self,
-        rules: &ContextRules,
+        plan_config: &PlanContextConfig,
         artifact_context: &ArtifactContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation>;
@@ -446,7 +463,7 @@ pub(crate) trait SourceCheck {
 pub(crate) trait ArtifactCheck {
     fn artifact_context_check(
         &self,
-        rules: &ContextRules,
+        plan_config: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         artifact_cache: &ArtifactCache,
         artifact_context: &ArtifactContext,
@@ -490,15 +507,18 @@ impl Checker {
 impl SourceCheck for Checker {
     fn source_context_check_with_plan(
         &self,
-        rules: &ContextRules,
+        plan_config: &PlanContextConfig,
         plan_context: &PlanContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
         debug!("Checking package source against plan for issues");
         let mut violations = Vec::new();
         for source_check in self.source_checks.iter() {
-            let mut source_violations =
-                source_check.source_context_check_with_plan(rules, plan_context, source_context);
+            let mut source_violations = source_check.source_context_check_with_plan(
+                plan_config,
+                plan_context,
+                source_context,
+            );
             violations.append(&mut source_violations);
         }
         violations
@@ -506,7 +526,7 @@ impl SourceCheck for Checker {
 
     fn source_context_check_with_artifact(
         &self,
-        rules: &ContextRules,
+        plan_config: &PlanContextConfig,
         artifact_context: &ArtifactContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
@@ -514,7 +534,7 @@ impl SourceCheck for Checker {
         let mut violations = Vec::new();
         for source_check in self.source_checks.iter() {
             let mut source_violations = source_check.source_context_check_with_artifact(
-                rules,
+                plan_config,
                 artifact_context,
                 source_context,
             );
@@ -527,7 +547,7 @@ impl SourceCheck for Checker {
 impl ArtifactCheck for Checker {
     fn artifact_context_check(
         &self,
-        rules: &ContextRules,
+        plan_config: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         artifact_cache: &ArtifactCache,
         artifact_context: &ArtifactContext,
@@ -536,7 +556,7 @@ impl ArtifactCheck for Checker {
         let mut violations = Vec::new();
         for artifact_check in self.artifact_checks.iter() {
             let mut artifact_violations = artifact_check.artifact_context_check(
-                rules,
+                plan_config,
                 checker_context,
                 artifact_cache,
                 artifact_context,

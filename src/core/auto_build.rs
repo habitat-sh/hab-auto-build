@@ -27,7 +27,7 @@ use tracing::{debug, error, info, trace};
 
 use crate::{
     check::{
-        ArtifactCheck, Checker, CheckerContext, ContextRules, LeveledArtifactCheckViolation,
+        ArtifactCheck, Checker, CheckerContext, PlanContextConfig, LeveledArtifactCheckViolation,
         LeveledSourceCheckViolation, SourceCheck,
     },
     core::{
@@ -598,7 +598,7 @@ impl AutoBuildContext {
                         let source_violations = if check_source {
                             let checker = Checker::new();
                             checker.source_context_check_with_plan(
-                                &plan_ctx.context_rules(),
+                                &plan_ctx.config(),
                                 &plan_ctx,
                                 &source_ctx,
                             )
@@ -650,7 +650,7 @@ impl AutoBuildContext {
                     let source_violations = if check_source {
                         let checker = Checker::new();
                         checker.source_context_check_with_plan(
-                            &plan_ctx.context_rules(),
+                            &plan_ctx.config(),
                             &plan_ctx,
                             &source_ctx,
                         )
@@ -1126,17 +1126,17 @@ impl AutoBuildContext {
 
     pub fn package_check(&self, package_index: NodeIndex) -> Result<PlanCheckStatus> {
         let artifact_cache = self.artifact_cache.read().unwrap();
-        let (rules, artifact) = {
+        let (plan_config, artifact) = {
             match &self.dep_graph.build_graph[package_index] {
                 Dependency::ResolvedDep(ident) => {
-                    (ContextRules::default(), artifact_cache.artifact(ident))
+                    (PlanContextConfig::default(), artifact_cache.artifact(ident))
                 }
                 Dependency::RemoteDep(resolved_dep_ident) => (
-                    ContextRules::default(),
+                    PlanContextConfig::default(),
                     artifact_cache.latest_artifact(resolved_dep_ident),
                 ),
                 Dependency::LocalPlan(plan_ctx) => (
-                    plan_ctx.context_rules(),
+                    plan_ctx.config(),
                     artifact_cache.latest_plan_artifact(&plan_ctx.id),
                 ),
             }
@@ -1157,7 +1157,7 @@ impl AutoBuildContext {
             let checker = Checker::new();
             let mut checker_context = CheckerContext::default();
             Some(checker.artifact_context_check(
-                &rules,
+                &plan_config,
                 &mut checker_context,
                 &artifact_cache,
                 artifact,
@@ -1194,7 +1194,7 @@ impl AutoBuildContext {
         let checker = Checker::new();
         let mut checker_context = CheckerContext::default();
         let artifact_violations = checker.artifact_context_check(
-            &build_step.plan_ctx.context_rules(),
+            &build_step.plan_ctx.config(),
             &mut checker_context,
             &artifact_cache,
             &artifact_ctx,

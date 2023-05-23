@@ -11,7 +11,7 @@ use tracing::{debug, error};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, ContextRules,
+        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, PlanContextConfig,
         LeveledArtifactCheckViolation, ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackageIdent, PackagePath},
@@ -358,7 +358,7 @@ impl Default for ScriptCheck {
 impl ArtifactCheck for ScriptCheck {
     fn artifact_context_check(
         &self,
-        rules: &ContextRules,
+        rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         _artifact_cache: &ArtifactCache,
         artifact_context: &ArtifactContext,

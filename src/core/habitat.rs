@@ -1,14 +1,14 @@
+use crate::{check::PlanContextConfig, core::PackageTarget, store::Store};
 use color_eyre::eyre::{eyre, Context, Result};
 use std::{
     env,
     path::{Path, PathBuf},
     process::Stdio,
 };
-use subprocess::{Exec, NullFile, Redirection};
+use subprocess::{Exec, ExitStatus, NullFile, Redirection};
 use tempdir::TempDir;
 use tracing::{debug, error, trace};
-
-use crate::{core::PackageTarget, store::Store};
+use which::which;
 
 use super::{
     ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep, FSRootPath,
@@ -213,7 +213,7 @@ fn copy_build_failure_output(
 
 pub(crate) fn native_package_build(
     build_step: &BuildStep,
-    _artifact_cache: &ArtifactCache,
+    artifact_cache: &ArtifactCache,
     store: &Store,
 ) -> Result<ArtifactContext> {
     let tmp_path = store.temp_dir_path();
@@ -240,40 +240,130 @@ pub(crate) fn native_package_build(
         .strip_prefix(&build_step.repo_ctx.path)
         .unwrap();
 
-    copy_source_to_cache(
-        build_step,
-        store,
-        &HabitatRootPath::default().source_cache(),
-    )?;
-
-    debug!(
-        "Starting build of native package {}, logging output to {}",
-        relative_plan_context.display(),
-        build_log_path.display()
-    );
-
-    let mut cmd = Exec::cmd("sudo")
-        .arg("-E")
-        .arg("env")
-        .arg(format!("PATH={}", env::var("PATH").unwrap_or_default()))
-        .arg("hab")
-        .arg("pkg")
-        .arg("build")
-        .arg("-N")
-        .arg(relative_plan_context)
-        
-        .env("HAB_FEAT_NATIVE_PACKAGE_SUPPORT", "1")
-        .env("HAB_OUTPUT_PATH", tmp_dir.path())
-        .env("BUILD_PKG_TARGET", PackageTarget::default().to_string())
-        .cwd(build_step.repo_ctx.path.as_ref())
-        .stdin(NullFile)
-        .stdout(Redirection::File(build_log))
-        .stderr(Redirection::Merge);
-    if !build_step.allow_remote {
-        cmd = cmd.env("HAB_BLDR_URL", "https://non-existent");
+    let mut cmd;
+    let mut exit_status;
+    if let Some(PlanContextConfig {
+        docker_image: Some(docker_image),
+        ..
+    }) = &build_step.plan_ctx.plan_config
+    {
+        debug!(
+            "Starting build of native package {} with image {}, logging output to {}",
+            relative_plan_context.display(),
+            docker_image,
+            build_log_path.display()
+        );
+        let hab_binary = which("hab").with_context(|| {
+            format!(
+                "Failed to find hab binary to build native package {}",
+                build_step.plan_ctx.id
+            )
+        })?;
+        let deps_to_install = build_step
+            .deps_to_install
+            .iter()
+            .filter_map(|dep| artifact_cache.latest_plan_artifact(dep))
+            .map(|artifact| {
+                format!(
+                    "{}",
+                    ArtifactCachePath::new(HabitatRootPath::default())
+                        .as_ref()
+                        .join(artifact.id.artifact_name())
+                        .display(),
+                )
+            })
+            .collect::<Vec<String>>()
+            .join(":");
+        let container_name = tmp_dir.path().file_name().unwrap();
+        cmd = Exec::cmd("docker")
+            .arg("run")
+            .arg("-it")
+            .arg("--name")
+            .arg(container_name)
+            .arg("--rm")
+            .arg("-v")
+            .arg(format!(
+                "{}:/src",
+                build_step.repo_ctx.path.as_ref().display()
+            ));
+        if let Some(source) = &build_step.plan_ctx.source {
+            let source_cache_folder = HabitatRootPath::default().source_cache();
+            let store_archive = store.package_source_store_path(&source).archive_data_path();
+            let source_cache_path = source_cache_folder.as_ref().join(source.url.filename()?);
+            cmd = cmd.arg("-v").arg(format!(
+                "{}:{}",
+                store_archive.as_ref().display(),
+                source_cache_path.display()
+            ));
+        }
+        cmd = cmd
+            .arg("-v")
+            .arg(format!("{}:/bin/hab", hab_binary.display()))
+            .arg("-v")
+            .arg(format!("{}:/output", build_output_dir.display()))
+            .arg("-v")
+            .arg(format!("/hab/cache/artifacts:/hab/cache/artifacts"))
+            .arg("-v")
+            .arg(format!("/hab/cache/keys:/hab/cache/keys"))
+            .arg("--workdir")
+            .arg("/src")
+            .arg("-e")
+            .arg(format!("HAB_STUDIO_INSTALL_PKGS={}", deps_to_install))
+            .arg("-e")
+            .arg("NO_INSTALL_DEPS=1")
+            .arg("-e")
+            .arg("HAB_LICENSE=accept")
+            .arg("-e")
+            .arg("HAB_FEAT_NATIVE_PACKAGE_SUPPORT=1")
+            .arg("-e")
+            .arg("HAB_OUTPUT_PATH=/output")
+            .arg("-e")
+            .arg(format!(
+                "BUILD_PKG_TARGET={}",
+                PackageTarget::default().to_string()
+            ))
+            .arg(docker_image)
+            .arg("build")
+            .arg(relative_plan_context)
+            .cwd(build_step.repo_ctx.path.as_ref())
+            .stdin(Redirection::None)
+            .stdout(Redirection::File(build_log))
+            .stderr(Redirection::Merge);
+        trace!("Executing command: {:?}", cmd);
+        exit_status = cmd.join()?;
+    } else {
+        debug!(
+            "Starting build of native package {}, logging output to {}",
+            relative_plan_context.display(),
+            build_log_path.display()
+        );
+        copy_source_to_cache(
+            build_step,
+            store,
+            &HabitatRootPath::default().source_cache(),
+        )?;
+        cmd = Exec::cmd("sudo")
+            .arg("-E")
+            .arg("env")
+            .arg(format!("PATH={}", env::var("PATH").unwrap_or_default()))
+            .arg("hab")
+            .arg("pkg")
+            .arg("build")
+            .arg("-N")
+            .arg(relative_plan_context)
+            .env("HAB_FEAT_NATIVE_PACKAGE_SUPPORT", "1")
+            .env("HAB_OUTPUT_PATH", tmp_dir.path())
+            .env("BUILD_PKG_TARGET", PackageTarget::default().to_string())
+            .cwd(build_step.repo_ctx.path.as_ref())
+            .stdin(NullFile)
+            .stdout(Redirection::File(build_log))
+            .stderr(Redirection::Merge);
+        if !build_step.allow_remote {
+            cmd = cmd.env("HAB_BLDR_URL", "https://non-existent");
+        }
+        trace!("Executing command: {:?}", cmd);
+        exit_status = cmd.join()?;
     }
-    trace!("Executing command: {:?}", cmd);
-    let exit_status = cmd.join()?;
 
     if exit_status.success() {
         let artifact_path =

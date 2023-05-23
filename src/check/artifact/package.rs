@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, ContextRules,
+        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, PlanContextConfig,
         LeveledArtifactCheckViolation, ViolationLevel,
     },
     core::{
@@ -336,7 +336,7 @@ pub(crate) struct PackageBeforeCheck {}
 impl ArtifactCheck for PackageBeforeCheck {
     fn artifact_context_check(
         &self,
-        rules: &ContextRules,
+        rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         artifact_cache: &ArtifactCache,
         artifact_context: &ArtifactContext,
@@ -661,7 +661,7 @@ pub(crate) struct PackageAfterCheck {}
 impl ArtifactCheck for PackageAfterCheck {
     fn artifact_context_check(
         &self,
-        rules: &ContextRules,
+        rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         _artifact_cache: &ArtifactCache,
         _artifact_context: &ArtifactContext,

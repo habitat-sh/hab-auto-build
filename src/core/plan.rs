@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
 use crate::{
-    check::ContextRules,
+    check::PlanContextConfig,
     store::{self, ModificationIndex},
 };
 
@@ -117,7 +117,7 @@ impl AsRef<Path> for PlanContextFilePath {
 pub(crate) struct PlanFilePath(PathBuf);
 
 impl PlanFilePath {
-    pub fn context_rules_path(&self) -> PathBuf {
+    pub fn plan_config_path(&self) -> PathBuf {
         self.0.parent().unwrap().join(PLAN_CONFIG_FILE)
     }
 }
@@ -181,13 +181,13 @@ pub(crate) struct PlanContext {
     pub latest_artifact: Option<PlanContextLatestArtifact>,
     pub files_changed: Vec<PlanContextFileChange>,
     pub is_native: bool,
-    pub rules: Option<ContextRules>,
+    pub plan_config: Option<PlanContextConfig>,
 }
 
 impl PlanContext {
-    pub fn context_rules(&self) -> ContextRules {
-        let context_rules = ContextRules::default();
-        if let Some(rules) = self.rules.as_ref() {
+    pub fn config(&self) -> PlanContextConfig {
+        let context_rules = PlanContextConfig::default();
+        if let Some(rules) = self.plan_config.as_ref() {
             context_rules.merge(rules)
         } else {
             context_rules
@@ -260,11 +260,11 @@ impl PlanContext {
                 version: raw_data.version,
                 target: target.to_owned(),
             });
-            let rules_path = plan_path.context_rules_path();
-            let rules = if let Ok(mut file) = std::fs::File::open(rules_path.as_path()) {
+            let plan_config_path = plan_path.plan_config_path();
+            let plan_config = if let Ok(mut file) = std::fs::File::open(plan_config_path.as_path()) {
                 let mut data = String::new();
                 file.read_to_string(&mut data)?;
-                match ContextRules::from_str(data.as_str())
+                match PlanContextConfig::from_str(data.as_str())
                     .with_section(move || {
                         data.header(format!("{}:", "File Contents".bright_cyan()))
                     })
@@ -273,7 +273,7 @@ impl PlanContext {
                     }) {
                     Ok(plan_rules) => Some(plan_rules),
                     Err(err) => {
-                        info!(target: "user-ui", "{} Failed to read plan config from {}: {:?}", "error:".bold().red(), rules_path.strip_prefix(repo_ctx.path.as_ref()).unwrap().display(), err);
+                        info!(target: "user-ui", "{} Failed to read plan config from {}: {:?}", "error:".bold().red(), plan_config_path.strip_prefix(repo_ctx.path.as_ref()).unwrap().display(), err);
                         None
                     }
                 }
@@ -305,7 +305,7 @@ impl PlanContext {
                     .collect(),
                 latest_artifact: None,
                 files_changed: Vec::new(),
-                rules,
+                plan_config,
             };
             let latest_artifact = artifact_cache.latest_plan_artifact(&plan_ctx.id);
             plan_ctx.determine_changes(connection, modification_index, latest_artifact)?;

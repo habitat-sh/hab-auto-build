@@ -7,7 +7,7 @@ use tracing::{debug, trace};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, ContextRules,
+        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, PlanContextConfig,
         LeveledArtifactCheckViolation, ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, ElfType, GlobSetExpression, PackageIdent, PackagePath},
@@ -694,7 +694,7 @@ pub(crate) struct ElfCheck {}
 impl ArtifactCheck for ElfCheck {
     fn artifact_context_check(
         &self,
-        rules: &ContextRules,
+        rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         _artifact_cache: &ArtifactCache,
         artifact_context: &ArtifactContext,

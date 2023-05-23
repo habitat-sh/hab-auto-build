@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     check::{
-        ContextRules, LeveledSourceCheckViolation, SourceCheck, SourceCheckViolation,
+        PlanContextConfig, LeveledSourceCheckViolation, SourceCheck, SourceCheckViolation,
         SourceRuleOptions, ViolationLevel,
     },
     core::{ArtifactContext, Blake3, PackageSha256Sum, PlanContext, SourceContext},
@@ -176,7 +176,7 @@ pub(crate) struct LicenseCheck {}
 impl LicenseCheck {
     fn source_context_check(
         &self,
-        rules: &ContextRules,
+        rules: &PlanContextConfig,
         license_expressions: &[String],
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
@@ -349,7 +349,7 @@ impl LicenseCheck {
 impl SourceCheck for LicenseCheck {
     fn source_context_check_with_plan(
         &self,
-        rules: &ContextRules,
+        rules: &PlanContextConfig,
         plan_context: &PlanContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
@@ -358,7 +358,7 @@ impl SourceCheck for LicenseCheck {
 
     fn source_context_check_with_artifact(
         &self,
-        rules: &ContextRules,
+        rules: &PlanContextConfig,
         artifact_context: &ArtifactContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
