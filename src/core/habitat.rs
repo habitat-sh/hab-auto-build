@@ -296,6 +296,9 @@ pub(crate) fn native_package_build(
                 source_cache_path.display()
             ));
         }
+        if !build_step.allow_remote {
+            cmd = cmd.arg("-e").arg("HAB_BLDR_URL=https://non-existent");
+        }
         cmd = cmd
             .arg("-v")
             .arg(format!("{}:/bin/hab", hab_binary.display()))
