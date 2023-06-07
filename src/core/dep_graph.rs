@@ -559,9 +559,10 @@ impl DepGraph {
     pub fn detect_changes_in_deps<'a>(
         &self,
         node_indices: impl IntoIterator<Item = &'a NodeIndex>,
+        build_target: PackageTarget,
     ) -> HashMap<NodeIndex, Vec<DependencyChangeCause>> {
         let node_indices = node_indices.into_iter().collect::<Vec<_>>();
-        let changes = self.detect_changes();
+        let changes = self.detect_changes(build_target);
         changes
             .node_references()
             .filter(|(key, _)| node_indices.contains(&key))
@@ -571,8 +572,9 @@ impl DepGraph {
 
     pub fn detect_changes_in_repos(
         &self,
+        build_target: PackageTarget,
     ) -> BTreeMap<RepoContextID, HashMap<NodeIndex, Vec<DependencyChangeCause>>> {
-        let changed_deps = self.detect_changes();
+        let changed_deps = self.detect_changes(build_target);
         let mut changed_deps_by_repo: BTreeMap<
             RepoContextID,
             HashMap<NodeIndex, Vec<DependencyChangeCause>>,
@@ -592,7 +594,7 @@ impl DepGraph {
         changed_deps_by_repo
     }
 
-    pub fn detect_changes(&self) -> StableGraph<Vec<DependencyChangeCause>, DependencyType> {
+    pub fn detect_changes(&self, build_target: PackageTarget) -> StableGraph<Vec<DependencyChangeCause>, DependencyType> {
         let dep_types = [
             DependencyType::Build,
             DependencyType::Runtime,
@@ -609,12 +611,14 @@ impl DepGraph {
                 let node = &self.build_graph[node_index];
                 match node {
                     Dependency::LocalPlan(PlanContext {
-                        id: _,
-                        repo_id: _,
+                        id,
                         latest_artifact,
                         files_changed,
                         ..
                     }) => {
+                        if id.as_ref().target != build_target {
+                            continue;
+                        }
                         if let Some(latest_artifact) = latest_artifact {
                             if !files_changed.is_empty() {
                                 causes.push(DependencyChangeCause::PlanContextChanged {

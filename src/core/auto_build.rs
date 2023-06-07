@@ -789,9 +789,9 @@ impl AutoBuildContext {
             .collect())
     }
 
-    pub fn changes(&self, package_indices: &[NodeIndex]) -> Vec<RepoChanges<'_>> {
+    pub fn changes(&self, package_indices: &[NodeIndex], build_target: PackageTarget) -> Vec<RepoChanges<'_>> {
         self.dep_graph
-            .detect_changes_in_repos()
+            .detect_changes_in_repos(build_target)
             .into_iter()
             .map(|(repo_ctx_id, changes)| RepoChanges {
                 repo: self.repos.get(&repo_ctx_id).unwrap(),
@@ -830,9 +830,10 @@ impl AutoBuildContext {
         &mut self,
         connection: &mut SqliteConnection,
         plan_node_indices: &[NodeIndex],
+        build_target: PackageTarget
     ) -> Result<Vec<AddStatus>, AddError> {
         let mut results = Vec::new();
-        let plan_node_changes = self.dep_graph.detect_changes_in_deps(plan_node_indices);
+        let plan_node_changes = self.dep_graph.detect_changes_in_deps(plan_node_indices, build_target);
         let artifact_cache = self.artifact_cache.read().unwrap();
         for plan_node_index in plan_node_indices {
             match self.dep_graph.dep_mut(*plan_node_index) {
@@ -881,7 +882,7 @@ impl AutoBuildContext {
                     }
                     assert!({
                         let plan_node_changes =
-                            self.dep_graph.detect_changes_in_deps(&[*plan_node_index]);
+                            self.dep_graph.detect_changes_in_deps(&[*plan_node_index], build_target);
                         let causes = plan_node_changes.get(&plan_node_index);
                         causes.is_some()
                     })
@@ -895,9 +896,10 @@ impl AutoBuildContext {
         &mut self,
         connection: &mut SqliteConnection,
         plan_node_indices: &[NodeIndex],
+        build_target: PackageTarget,
     ) -> Result<Vec<RemoveStatus>, RemoveError> {
         let mut results = Vec::new();
-        let plan_node_changes = self.dep_graph.detect_changes_in_deps(plan_node_indices);
+        let plan_node_changes = self.dep_graph.detect_changes_in_deps(plan_node_indices, build_target);
         let artifact_cache = self.artifact_cache.read().unwrap();
         for plan_node_index in plan_node_indices {
             match self.dep_graph.dep_mut(*plan_node_index) {
@@ -959,7 +961,7 @@ impl AutoBuildContext {
                     }
                     assert!({
                         let plan_node_changes =
-                            self.dep_graph.detect_changes_in_deps(&[*plan_node_index]);
+                            self.dep_graph.detect_changes_in_deps(&[*plan_node_index], build_target);
                         let causes = plan_node_changes.get(&plan_node_index);
                         causes.is_none()
                     })
@@ -972,9 +974,10 @@ impl AutoBuildContext {
     pub fn build_plan_generate(
         &self,
         package_indices: Vec<NodeIndex>,
+        build_target: PackageTarget,
         allow_remote: bool,
     ) -> Result<BuildPlan> {
-        let base_changes_graph = self.dep_graph.detect_changes();
+        let base_changes_graph = self.dep_graph.detect_changes(build_target);
 
         let mut changes_graph = base_changes_graph.filter_map(
             |_node_index, node| Some(node),

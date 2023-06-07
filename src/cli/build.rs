@@ -64,7 +64,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         );
         return Ok(());
     }
-    let build_plan = run_context.build_plan_generate(package_indices, args.allow_remote)?;
+    let build_plan = run_context.build_plan_generate(package_indices, PackageTarget::default(), args.allow_remote)?;
     if args.dry_run {
         match args.format {
             OutputFormat::Plain => output_plain(build_plan)?,

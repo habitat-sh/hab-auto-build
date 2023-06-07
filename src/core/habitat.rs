@@ -742,7 +742,7 @@ pub(crate) fn standard_package_build(
     } else {
         let build_log_path =
             copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
-        Err(BuildError::Bootstrap(
+        Err(BuildError::Standard(
             build_step.plan_ctx.id.clone(),
             build_log_path,
         ))

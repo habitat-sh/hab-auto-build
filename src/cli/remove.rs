@@ -39,7 +39,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         return Ok(());
     }
     run_context.get_connection()?.exclusive_transaction(|connection| {
-        match run_context.remove_plans_from_changes(connection, &package_indices) {
+        match run_context.remove_plans_from_changes(connection, &package_indices, PackageTarget::default()) {
             Ok(statuses) => {
                 for status in statuses {
                     match status {

@@ -51,7 +51,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         );
         return Ok(());
     }
-    let changes = run_context.changes(&package_indices);
+    let changes = run_context.changes(&package_indices, PackageTarget::default());
 
     match args.format {
         OutputFormat::Plain => output_plain(changes, args.explain)?,
