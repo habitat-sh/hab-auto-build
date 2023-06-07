@@ -56,6 +56,10 @@ toml_edit = { version = "0.19.7", features = ["serde"]}
 owo-colors = "3.5.0"
 spdx = "0.10.0"
 which = "4.4.0"
+axum = "0.6.18"
+rust-embed = "6.6.1"
+tokio = "1.28.1"
+mime_guess = "2.0.4"
 
 [build-dependencies]
 color-eyre = { version = "0.6", default-features = false }
