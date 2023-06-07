@@ -29,10 +29,13 @@ use std::{
 };
 use tracing::{error, info, warn};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, PartialOrd, Ord, Serialize)]
 pub(crate) enum DependencyType {
+    #[serde(rename = "studio")]
     Studio,
+    #[serde(rename = "runtime")]
     Runtime,
+    #[serde(rename = "build")]
     Build,
 }
 
@@ -75,7 +78,7 @@ type PackageVersionList = HashMap<
     >,
 >;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "dependency_type", content = "data")]
 pub(crate) enum Dependency {
     #[serde(rename = "resolved_dependency")]
@@ -174,6 +177,33 @@ impl DependencyChangeCause {
             }
             DependencyChangeCause::NoBuiltArtifact => print_emojis(":sparkles:"),
         }
+    }
+}
+
+#[derive(Serialize, Debug)]
+pub(crate) struct DepGraphData {
+    pub nodes: HashMap<u32, Dependency>,
+    pub edges: Vec<(u32, u32, DependencyType)>,
+}
+
+impl From<&DepGraph> for DepGraphData {
+    fn from(dep_graph: &DepGraph) -> Self {
+        let mut data = DepGraphData {
+            nodes: HashMap::new(),
+            edges: Vec::new(),
+        };
+        for node_index in dep_graph.build_graph.node_indices() {
+            let node = dep_graph.build_graph[node_index].clone();
+            data.nodes.insert(node_index.index() as u32, node);
+        }
+        for edge_index in dep_graph.build_graph.edge_indices() {
+            if let Some((source, target)) = dep_graph.build_graph.edge_endpoints(edge_index) {
+                let edge = dep_graph.build_graph[edge_index];
+                data.edges
+                    .push((source.index() as u32, target.index() as u32, edge));
+            }
+        }
+        data
     }
 }
 

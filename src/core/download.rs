@@ -1,13 +1,19 @@
 use color_eyre::eyre::{eyre, Result};
 use lazy_static::lazy_static;
-use reqwest::{blocking::ClientBuilder, header, redirect::Policy, Method, StatusCode, Url};
+use reqwest::{
+    blocking::{Client, ClientBuilder, Request, Response},
+    header,
+    redirect::Policy,
+    Method, StatusCode, Url,
+};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 use suppaftp::FtpStream;
-use tracing::{debug};
+use tracing::{debug, log::error};
 
 lazy_static! {
     static ref DOWNLOAD_THREAD_COUNT: u64 = num_cpus::get() as u64;
@@ -137,7 +143,7 @@ impl Download {
                 .extend(additional_headers.clone().into_iter());
             additional_headers.clear();
 
-            let response = client.execute(request)?;
+            let response = Download::execute_request(&client, request)?;
             let headers = response.headers();
             if let Some(content_disposition) = headers.get(header::CONTENT_DISPOSITION) {
                 if let Ok(value) = content_disposition.to_str() {
@@ -164,7 +170,7 @@ impl Download {
         request
             .headers_mut()
             .insert(header::RANGE, "bytes=0-0".parse().unwrap());
-        let response = client.execute(request)?;
+        let response = Download::execute_request(&client, request)?;
         let file_content_length = if let (StatusCode::PARTIAL_CONTENT, Some(Ok(range))) = (
             response.status(),
             response
@@ -204,17 +210,14 @@ impl Download {
                                     .expect("Failed to seek range in file");
 
                                 let mut request = reqwest::blocking::Request::new(Method::GET, url);
-                                request
-                                    .headers_mut()
-                                    .extend(base_headers.into_iter());
+                                request.headers_mut().extend(base_headers.into_iter());
                                 request.headers_mut().insert(
                                     header::RANGE,
                                     format!("bytes={}-{}", range_start, range_end)
                                         .parse()
                                         .unwrap(),
                                 );
-                                let mut file_range_res = client
-                                    .execute(request)
+                                let mut file_range_res = Download::execute_request(&client, request)
                                     .expect("Failed to send request to download file");
                                 for _ in 0..buffer_chunks {
                                     let mut buffer = vec![0u8; *DOWNLOAD_MEMORY_BUFFER as usize];
@@ -245,11 +248,29 @@ impl Download {
             }
             None => {
                 debug!("Starting single-threaded download of file from {}", url);
-                let response = client.get(url.as_ref()).send()?;
+                let mut request = reqwest::blocking::Request::new(Method::GET, url);
+                let response = Download::execute_request(&client, request)?;
                 let mut file = File::create(self.filename)?;
                 file.write_all(&response.bytes()?)?;
                 file.sync_all()?;
                 Ok(())
+            }
+        }
+    }
+
+    fn execute_request(client: &Client, request: Request) -> reqwest::Result<Response> {
+        let mut attempts_remaining = 10;
+        loop {
+            let cloned_request = request.try_clone().unwrap();
+            match client.execute(cloned_request) {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    error!("Failed to complete HTTP request: {}", err);
+                    attempts_remaining -= 1;
+                    if attempts_remaining == 0 {
+                        return Err(err);
+                    }
+                }
             }
         }
     }

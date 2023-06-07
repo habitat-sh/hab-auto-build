@@ -38,10 +38,10 @@ use crate::{
 };
 
 use super::{
-    habitat, DepGraph, DependencyChangeCause, PackageBuildVersion, PackageDepGlob, PackageDepIdent,
+    habitat::{self, BuildError}, DepGraph, DependencyChangeCause, PackageBuildVersion, PackageDepGlob, PackageDepIdent,
     PackageIdent, PackageName, PackageOrigin, PackageSha256Sum, PackageSource, PackageTarget,
     PackageVersion, PlanContext, PlanContextID, PlanScannerBuilder, RepoConfig, RepoContext,
-    RepoContextID,
+    RepoContextID, DepGraphData,
 };
 
 lazy_static! {
@@ -215,7 +215,18 @@ pub(crate) struct BuildStep<'a> {
 pub(crate) struct BuildStepResult {
     pub artifact_ident: PackageIdent,
     pub artifact_violations: Vec<LeveledArtifactCheckViolation>,
+    pub build_log: PathBuf
 }
+
+#[derive(Debug, Error)]
+pub(crate) enum BuildStepError {
+    #[error("Failed to complete build")]
+    Build(#[from] BuildError),
+    #[error("Failed to execute build step due to unexpected error")]
+    Unexpected(#[from] color_eyre::eyre::Error)
+}
+
+
 
 pub(crate) struct BuildPlan<'a> {
     pub check_steps: Vec<CheckStep<'a>>,
@@ -421,6 +432,10 @@ impl AutoBuildContext {
 
     pub fn is_empty(&self) -> bool {
         self.dep_graph.build_graph.node_count() == 0
+    }
+
+    pub fn dep_graph_data(&self) -> DepGraphData {
+        DepGraphData::from(&self.dep_graph)
     }
 
     pub fn glob_deps(
@@ -1171,10 +1186,10 @@ impl AutoBuildContext {
         ))
     }
 
-    pub fn build_step_execute(&self, build_step: &BuildStep<'_>) -> Result<BuildStepResult> {
+    pub fn build_step_execute(&self, build_step: &BuildStep<'_>) -> Result<BuildStepResult, BuildStepError> {
         let mut artifact_cache = self.artifact_cache.write().unwrap();
         let start = Instant::now();
-        let artifact_ctx = {
+        let build_output = {
             match build_step.studio {
                 BuildStepStudio::Native => {
                     habitat::native_package_build(&build_step, &artifact_cache, &self.store)?
@@ -1188,7 +1203,7 @@ impl AutoBuildContext {
             }
         };
         // Add the artifact to the cache
-        let artifact_ident = artifact_cache.artifact_add(&self.store, artifact_ctx)?;
+        let artifact_ident = artifact_cache.artifact_add(&self.store, build_output.artifact)?;
         let artifact_ctx = artifact_cache.artifact(&artifact_ident).unwrap();
         // Check the artifact for violations
         let checker = Checker::new();
@@ -1225,6 +1240,7 @@ impl AutoBuildContext {
         Ok(BuildStepResult {
             artifact_ident,
             artifact_violations,
+            build_log: build_output.build_log
         })
     }
 }

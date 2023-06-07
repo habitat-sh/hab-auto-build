@@ -1,18 +1,21 @@
 use crate::{check::PlanContextConfig, core::PackageTarget, store::Store};
+use chrono::{DateTime, Utc};
 use color_eyre::eyre::{eyre, Context, Result};
 use std::{
     env,
     path::{Path, PathBuf},
     process::Stdio,
+    time::SystemTime,
 };
 use subprocess::{Exec, ExitStatus, NullFile, Redirection};
 use tempdir::TempDir;
+use thiserror::Error;
 use tracing::{debug, error, trace};
 use which::which;
 
 use super::{
     ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep, FSRootPath,
-    HabitatRootPath, HabitatSourceCachePath,
+    HabitatRootPath, HabitatSourceCachePath, PlanContextID,
 };
 
 pub(crate) fn install_artifact(artifact_path: &ArtifactPath) -> Result<()> {
@@ -90,7 +93,7 @@ fn copy_build_success_output(
     _build_step: &BuildStep,
     build_log_path: impl AsRef<Path>,
     build_output_path: impl AsRef<Path>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, PathBuf)> {
     let last_build_path = build_output_path.as_ref().join("last_build.env");
     let last_build = std::fs::read_to_string(&last_build_path).with_context(|| {
         format!(
@@ -152,7 +155,7 @@ fn copy_build_success_output(
             final_artifact_path.display()
         )
     })?;
-    Ok(final_artifact_path)
+    Ok((final_artifact_path, final_build_log_path))
 }
 
 fn copy_build_failure_output(
@@ -160,28 +163,34 @@ fn copy_build_failure_output(
     build_step: &BuildStep,
     build_log_path: impl AsRef<Path>,
     build_output_path: impl AsRef<Path>,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let pre_build_path = build_output_path.as_ref().join("pre_build.env");
-    let pre_build = match std::fs::read_to_string(&pre_build_path).with_context(|| {
+    let pkg_ident = match std::fs::read_to_string(&pre_build_path).with_context(|| {
         format!(
             "Failed to read pre build file at '{}'",
             pre_build_path.display()
         )
     }) {
-        Ok(pre_build) => pre_build,
+        Ok(pre_build) => pre_build
+            .lines()
+            .into_iter()
+            .filter_map(|l| l.strip_prefix("pkg_ident="))
+            .next()
+            .unwrap()
+            .trim()
+            .replace("/", "-"),
         Err(err) => {
-            error!("Failed to copy build failure logs: {:?}", err);
-            return Ok(());
+            debug!("Failed to find pre_build file: {:#}", err);
+            let build_id = build_step.plan_ctx.id.as_ref();
+            format!(
+                "{}-{}-{}-{}",
+                build_id.origin,
+                build_id.name,
+                build_id.version,
+                Utc::now().format("%Y%m%d%H%M%S")
+            )
         }
     };
-    let pkg_ident = pre_build
-        .lines()
-        .into_iter()
-        .filter_map(|l| l.strip_prefix("pkg_ident="))
-        .next()
-        .unwrap()
-        .trim()
-        .replace("/", "-");
     let final_build_log_dir_path = store.package_build_failure_logs_path();
     std::fs::create_dir_all(final_build_log_dir_path.as_ref()).with_context(|| {
         format!(
@@ -208,14 +217,35 @@ fn copy_build_failure_output(
             )
         },
     )?;
-    Ok(())
+    Ok(final_build_log_path)
+}
+
+pub(crate) struct BuildOutput {
+    pub artifact: ArtifactContext,
+    pub build_log: PathBuf,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum BuildError {
+    #[error("Failed to build native package {0}, you can find the build log at {1}")]
+    Native(PlanContextID, PathBuf),
+    #[error("Failed to build bootstrap package {0}, you can find the build log at {1}")]
+    Bootstrap(PlanContextID, PathBuf),
+    #[error("Failed to build standard package {0}, you can find the build log at {1}")]
+    Standard(PlanContextID, PathBuf),
+    #[error("Failed due to unexpected IO error")]
+    IO(#[from] std::io::Error),
+    #[error("Failed due to unexpected sub process error")]
+    Popen(#[from] subprocess::PopenError),
+    #[error("Failed due to an unexpected build error")]
+    Unexpected(#[from] color_eyre::eyre::Error),
 }
 
 pub(crate) fn native_package_build(
     build_step: &BuildStep,
     artifact_cache: &ArtifactCache,
     store: &Store,
-) -> Result<ArtifactContext> {
+) -> Result<BuildOutput, BuildError> {
     let tmp_path = store.temp_dir_path();
     std::fs::create_dir_all(tmp_path.as_ref())?;
     let tmp_dir = TempDir::new_in(tmp_path.as_ref(), "native-build").with_context(|| {
@@ -369,21 +399,25 @@ pub(crate) fn native_package_build(
     }
 
     if exit_status.success() {
-        let artifact_path =
+        let (artifact_path, build_log_path) =
             copy_build_success_output(store, build_step, &build_log_path, build_output_dir)?;
-        Ok(
-            ArtifactContext::read_from_disk(artifact_path.as_path(), None).with_context(|| {
-                format!(
-                    "Failed to index built artifact: {}",
-                    artifact_path.display()
-                )
-            })?,
-        )
+        Ok(BuildOutput {
+            artifact: ArtifactContext::read_from_disk(artifact_path.as_path(), None).with_context(
+                || {
+                    format!(
+                        "Failed to index built artifact: {}",
+                        artifact_path.display()
+                    )
+                },
+            )?,
+            build_log: build_log_path,
+        })
     } else {
-        copy_build_failure_output(store, build_step, &build_log_path, build_output_dir)?;
-        Err(eyre!(
-            "Failed to build native package: {}",
-            build_step.plan_ctx.id
+        let build_log_path =
+            copy_build_failure_output(store, build_step, &build_log_path, build_output_dir)?;
+        Err(BuildError::Native(
+            build_step.plan_ctx.id.clone(),
+            build_log_path,
         ))
     }
 }
@@ -393,7 +427,7 @@ pub(crate) fn bootstrap_package_build(
     artifact_cache: &ArtifactCache,
     store: &Store,
     id: u64,
-) -> Result<ArtifactContext> {
+) -> Result<BuildOutput, BuildError> {
     let tmp_path = store.temp_dir_path();
     std::fs::create_dir_all(tmp_path.as_ref())?;
     let tmp_dir = TempDir::new_in(tmp_path.as_ref(), "bootstrap-build").with_context(|| {
@@ -471,11 +505,14 @@ pub(crate) fn bootstrap_package_build(
         .stderr(Redirection::Merge)
         .join()?;
     if !exit_status.success() {
-        copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
+        let build_log_path =
+            copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
         return Err(eyre!(
-            "Failed to cleanup bootstrap studio at '{}'",
-            studio_root.as_ref().display()
-        ));
+            "Failed to cleanup bootstrap studio at '{}', you can find the build log at {}",
+            studio_root.as_ref().display(),
+            build_log_path.display()
+        )
+        .into());
     }
 
     let build_log = std::fs::File::options()
@@ -526,21 +563,25 @@ pub(crate) fn bootstrap_package_build(
     trace!("Executing command: {:?}", cmd);
     let exit_status = cmd.join()?;
     if exit_status.success() {
-        let artifact_path =
+        let (artifact_path, build_log_path) =
             copy_build_success_output(store, build_step, &build_log_path, &build_output_dir)?;
-        Ok(
-            ArtifactContext::read_from_disk(artifact_path.as_path(), None).with_context(|| {
-                format!(
-                    "Failed to index built artifact: {}",
-                    artifact_path.display()
-                )
-            })?,
-        )
+        Ok(BuildOutput {
+            artifact: ArtifactContext::read_from_disk(artifact_path.as_path(), None).with_context(
+                || {
+                    format!(
+                        "Failed to index built artifact: {}",
+                        artifact_path.display()
+                    )
+                },
+            )?,
+            build_log: build_log_path,
+        })
     } else {
-        copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
-        Err(eyre!(
-            "Failed to build bootstrap package: {}",
-            build_step.plan_ctx.id
+        let build_log_path =
+            copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
+        Err(BuildError::Bootstrap(
+            build_step.plan_ctx.id.clone(),
+            build_log_path,
         ))
     }
 }
@@ -550,7 +591,7 @@ pub(crate) fn standard_package_build(
     artifact_cache: &ArtifactCache,
     store: &Store,
     id: u64,
-) -> Result<ArtifactContext> {
+) -> Result<BuildOutput, BuildError> {
     let tmp_path = store.temp_dir_path();
     std::fs::create_dir_all(tmp_path.as_ref())?;
     let tmp_dir = TempDir::new_in(tmp_path.as_ref(), "standard-build").with_context(|| {
@@ -629,11 +670,14 @@ pub(crate) fn standard_package_build(
     let exit_status = cmd.join()?;
 
     if !exit_status.success() {
-        copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
+        let build_log_path =
+            copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
         return Err(eyre!(
-            "Failed to cleanup standard studio at '{}'",
-            studio_root.as_ref().display()
-        ));
+            "Failed to cleanup standard studio at '{}', you can find the build log at {}",
+            studio_root.as_ref().display(),
+            build_log_path.display()
+        )
+        .into());
     }
 
     let build_log = std::fs::File::options()
@@ -682,21 +726,25 @@ pub(crate) fn standard_package_build(
     let exit_status = cmd.join()?;
 
     if exit_status.success() {
-        let artifact_path =
+        let (artifact_path, build_log_path) =
             copy_build_success_output(store, build_step, &build_log_path, &build_output_dir)?;
-        Ok(
-            ArtifactContext::read_from_disk(artifact_path.as_path(), None).with_context(|| {
-                format!(
-                    "Failed to index built artifact: {}",
-                    artifact_path.display()
-                )
-            })?,
-        )
+        Ok(BuildOutput {
+            artifact: ArtifactContext::read_from_disk(artifact_path.as_path(), None).with_context(
+                || {
+                    format!(
+                        "Failed to index built artifact: {}",
+                        artifact_path.display()
+                    )
+                },
+            )?,
+            build_log: build_log_path,
+        })
     } else {
-        copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
-        Err(eyre!(
-            "Failed to build standard package: {}",
-            build_step.plan_ctx.id
+        let build_log_path =
+            copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
+        Err(BuildError::Bootstrap(
+            build_step.plan_ctx.id.clone(),
+            build_log_path,
         ))
     }
 }

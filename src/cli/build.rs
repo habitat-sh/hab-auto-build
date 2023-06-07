@@ -7,11 +7,11 @@ use std::{env, path::PathBuf};
 use tracing::{error, info};
 
 use crate::{
-    check::{ViolationLevel},
+    check::ViolationLevel,
     cli::check::output_violations,
     core::{
-        AutoBuildConfig, AutoBuildContext, BuildPlan, BuildStep, Dependency,
-        DownloadStatus, PackageDepGlob, PackageTarget, PlanCheckStatus,
+        habitat::BuildError, AutoBuildConfig, AutoBuildContext, BuildPlan, BuildStep,
+        BuildStepError, Dependency, DownloadStatus, PackageDepGlob, PackageTarget, PlanCheckStatus,
     },
 };
 
@@ -198,7 +198,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                     )?;
                     if !all_checks_passed {
                         info!(target: "user-ui", "{} [{}] {}", "Build Failure".red().bold(), step.studio, step.plan_ctx.id);
-                        info!(target: "user-ui", "{}: Found issues with the package, you should fix them before building", "error".bold().red());
+                        info!(target: "user-ui", "{}: Found issues with the package {}, you should fix the plan at {} before re-attempting the build.", "error".bold().red(), step.plan_ctx.id.yellow(), step.plan_ctx.plan_path.as_ref().display().blue());
                         return Ok(());
                     }
                 }
@@ -206,45 +206,60 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                 DownloadStatus::NoSource => {
                     unreachable!()
                 }
-                DownloadStatus::InvalidArchive(_, _, _, _) => {
+                DownloadStatus::InvalidArchive(_, source, actual_shasum, _) => {
                     return Err(eyre!(
-                        "Failed to download package source, package shasum mismatch"
+                        "Failed to download package source, package shasum mismatch. Expected shasum {}, found shasum {}", source.shasum, actual_shasum
                     ));
                 }
             }
-            let build_result = run_context.build_step_execute(&step)?;
-            output_violations(
-                &[],
-                &build_result.artifact_violations,
-                &step.plan_ctx.id.to_string(),
-                false,
-                false,
-            )?;
+            match run_context.build_step_execute(&step) {
+                Ok(build_result) => {
+                    output_violations(
+                        &[],
+                        &build_result.artifact_violations,
+                        &step.plan_ctx.id.to_string(),
+                        false,
+                        false,
+                    )?;
 
-            let artifact_warnings = build_result
-                .artifact_violations
-                .iter()
-                .filter(|v| v.level == ViolationLevel::Warn)
-                .count();
-            let artifact_errors = build_result
-                .artifact_violations
-                .iter()
-                .filter(|v| v.level == ViolationLevel::Error)
-                .count();
-            match args.check_level {
-                CheckLevel::AllowWarnings if artifact_errors > 0 => all_checks_passed = false,
-                CheckLevel::Strict if artifact_errors + artifact_warnings > 0 => {
-                    all_checks_passed = false
+                    let artifact_warnings = build_result
+                        .artifact_violations
+                        .iter()
+                        .filter(|v| v.level == ViolationLevel::Warn)
+                        .count();
+                    let artifact_errors = build_result
+                        .artifact_violations
+                        .iter()
+                        .filter(|v| v.level == ViolationLevel::Error)
+                        .count();
+                    match args.check_level {
+                        CheckLevel::AllowWarnings if artifact_errors > 0 => {
+                            all_checks_passed = false
+                        }
+                        CheckLevel::Strict if artifact_errors + artifact_warnings > 0 => {
+                            all_checks_passed = false
+                        }
+                        _ => {}
+                    };
+
+                    if !all_checks_passed {
+                        info!(target: "user-ui", "{} [{}] {}", "Build Failure".red().bold(), step.studio, build_result.artifact_ident.artifact_name());
+                        info!(target: "user-ui", "{}: Found issues with the package {}, you should fix the plan at {} before re-attempting the build. You can find the build log at {}", "error".bold().red(), step.plan_ctx.id.yellow(), step.plan_ctx.plan_path.as_ref().display().blue(), build_result.build_log.display().blue());
+                        return Ok(());
+                    } else {
+                        info!(target: "user-ui", "{} [{}] {}", "Build Success".green().bold(), step.studio, build_result.artifact_ident.artifact_name());
+                    }
                 }
-                _ => {}
-            };
-
-            if !all_checks_passed {
-                info!(target: "user-ui", "{} [{}] {}", "Build Failure".red().bold(), step.studio, build_result.artifact_ident.artifact_name());
-                info!(target: "user-ui", "{}: Found issues with the built package, you should fix them before building more packages", "error".bold().red());
-                return Ok(());
-            } else {
-                info!(target: "user-ui", "{} [{}] {}", "Build Success".green().bold(), step.studio, build_result.artifact_ident.artifact_name());
+                Err(BuildStepError::Build(
+                    BuildError::Native(plan_ctx_id, build_log)
+                    | BuildError::Bootstrap(plan_ctx_id, build_log)
+                    | BuildError::Standard(plan_ctx_id, build_log),
+                )) => {
+                    info!(target: "user-ui", "{} [{}] {}", "Build Failure".red().bold(), step.studio, step.plan_ctx.id);
+                    info!(target: "user-ui", "{}: Failed to complete build of package {}, you should fix the plan at {} before re-attempting the build. You can find the build log at {}", "error".bold().red(), step.plan_ctx.id.yellow(), step.plan_ctx.plan_path.as_ref().display().blue(), build_log.display().blue());
+                    return Ok(());
+                }
+                Err(err) => return Err(err.into()),
             }
         }
     }

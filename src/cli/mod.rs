@@ -7,6 +7,7 @@ mod compare;
 mod download;
 mod output;
 mod remove;
+mod server;
 
 pub use output::*;
 
@@ -39,8 +40,8 @@ enum Commands {
     Add(add::Params),
     /// Remove a plan from the list of changed plans
     Remove(remove::Params),
-    
-    
+    /// Start a server to visualize the package build graph
+    Server(server::Params)
 }
 
 impl Cli {
@@ -55,6 +56,7 @@ impl Cli {
             Commands::Remove(args) => remove::execute(args),
             Commands::Build(args) => build::execute(args),
             Commands::Analyze(args) => analyze::execute(args),
+            Commands::Server(args) => server::execute(args)
         }
     }
 }
