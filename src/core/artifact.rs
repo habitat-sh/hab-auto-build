@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use color_eyre::{
     eyre::{eyre, Context, Result},
     Help, SectionExt,
@@ -309,7 +309,7 @@ impl ArtifactContext {
         hash: Option<&Blake3>,
     ) -> Result<ArtifactContext> {
         let f = std::fs::File::open(artifact_path.as_ref())?;
-        let created_at = f.metadata()?.modified()?;
+
         let mut reader = std::io::BufReader::new(f);
 
         // We skip the first 5 lines
@@ -569,6 +569,10 @@ impl ArtifactContext {
             })?
         };
         Ok(ArtifactContext {
+            created_at: DateTime::<Utc>::from_utc(
+                NaiveDateTime::parse_from_str(id.release.to_string().as_str(), "%Y%m%d%H%M%S").expect("Invalid release value"),
+                Utc,
+            ),
             id,
             target,
             package_type,
@@ -587,7 +591,6 @@ impl ArtifactContext {
             elfs,
             hash: hash.clone(),
             is_dirty: true,
-            created_at: DateTime::<Utc>::from(created_at),
         })
     }
 
