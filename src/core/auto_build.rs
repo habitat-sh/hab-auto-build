@@ -1225,20 +1225,6 @@ impl AutoBuildContext {
                 elapsed_duration_in_secs,
             )
         })?;
-        // Install the aritfact if it is a studio
-        let is_bootstrap_studio_package = build_step
-            .plan_ctx
-            .id
-            .as_ref()
-            .satisfies_dependency(&self.studios.bootstrap);
-        let is_standard_studio_package = build_step
-            .plan_ctx
-            .id
-            .as_ref()
-            .satisfies_dependency(&self.studios.standard);
-        if is_bootstrap_studio_package || is_standard_studio_package {
-            habitat::install_artifact(&artifact_cache.path.artifact_path(&artifact_ctx.id))?;
-        }
 
         Ok(BuildStepResult {
             artifact_ident,

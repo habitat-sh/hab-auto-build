@@ -1,6 +1,11 @@
+use super::{
+    ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep, FSRootPath,
+    HabitatRootPath, HabitatSourceCachePath, PlanContextID, PackageIdent,
+};
 use crate::{check::PlanContextConfig, core::PackageTarget, store::Store};
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::{eyre, Context, Result};
+use lazy_static::lazy_static;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -13,18 +18,19 @@ use thiserror::Error;
 use tracing::{debug, error, trace};
 use which::which;
 
-use super::{
-    ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep, FSRootPath,
-    HabitatRootPath, HabitatSourceCachePath, PlanContextID,
-};
+lazy_static! {
+    static ref HAB_BINARY: PathBuf =
+        { which("hab").expect("Failed to find hab binary in environment") };
+}
 
-pub(crate) fn install_artifact(artifact_path: &ArtifactPath) -> Result<()> {
+pub(crate) fn install_artifact_offline(package_ident: &PackageIdent) -> Result<()> {
+    debug!("Installing habitat package {}", package_ident);
     let exit_status = std::process::Command::new("sudo")
         .arg("-E")
-        .arg("hab")
+        .arg(HAB_BINARY.as_path())
         .arg("pkg")
         .arg("install")
-        .arg(artifact_path.as_ref())
+        .arg(ArtifactCachePath::default().artifact_path(package_ident).as_ref())
         .env("HAB_LICENSE", "accept-no-persist")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -283,12 +289,6 @@ pub(crate) fn native_package_build(
             docker_image,
             build_log_path.display()
         );
-        let hab_binary = which("hab").with_context(|| {
-            format!(
-                "Failed to find hab binary to build native package {}",
-                build_step.plan_ctx.id
-            )
-        })?;
         let deps_to_install = build_step
             .deps_to_install
             .iter()
@@ -331,7 +331,7 @@ pub(crate) fn native_package_build(
         }
         cmd = cmd
             .arg("-v")
-            .arg(format!("{}:/bin/hab", hab_binary.display()))
+            .arg(format!("{}:/bin/hab", HAB_BINARY.display()))
             .arg("-v")
             .arg(format!("{}:/output", build_output_dir.display()))
             .arg("-v")
@@ -379,7 +379,7 @@ pub(crate) fn native_package_build(
             .arg("-E")
             .arg("env")
             .arg(format!("PATH={}", env::var("PATH").unwrap_or_default()))
-            .arg("hab")
+            .arg(HAB_BINARY.as_path())
             .arg("pkg")
             .arg("build")
             .arg("-N")
@@ -487,9 +487,18 @@ pub(crate) fn bootstrap_package_build(
         build_log_path.display()
     );
 
+    install_artifact_offline(
+        &artifact_cache.latest_artifact(
+            &build_step
+                .studio_package
+                .unwrap()
+                .to_resolved_dep_ident(PackageTarget::default()),
+        ).unwrap().id,
+    )?;
+
     let exit_status = Exec::cmd("sudo")
         .arg("-E")
-        .arg("hab")
+        .arg(HAB_BINARY.as_path())
         .arg("pkg")
         .arg("exec")
         .arg(build_step.studio_package.unwrap().to_string())
@@ -533,7 +542,7 @@ pub(crate) fn bootstrap_package_build(
 
     let mut cmd = Exec::cmd("sudo")
         .arg("-E")
-        .arg("hab")
+        .arg(HAB_BINARY.as_path())
         .arg("pkg")
         .arg("exec")
         .arg(build_step.studio_package.unwrap().to_string())
@@ -653,7 +662,7 @@ pub(crate) fn standard_package_build(
 
     let cmd = Exec::cmd("sudo")
         .arg("-E")
-        .arg("hab")
+        .arg(HAB_BINARY.as_path())
         .arg("pkg")
         .arg("exec")
         .arg(build_step.studio_package.unwrap().to_string())
@@ -697,7 +706,7 @@ pub(crate) fn standard_package_build(
     )?;
     let mut cmd = Exec::cmd("sudo")
         .arg("-E")
-        .arg("hab")
+        .arg(HAB_BINARY.as_path())
         .arg("pkg")
         .arg("exec")
         .arg(build_step.studio_package.unwrap().to_string())
