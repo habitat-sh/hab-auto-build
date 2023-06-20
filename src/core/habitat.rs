@@ -660,6 +660,15 @@ pub(crate) fn standard_package_build(
         build_log_path.display()
     );
 
+    install_artifact_offline(
+        &artifact_cache.latest_artifact(
+            &build_step
+                .studio_package
+                .unwrap()
+                .to_resolved_dep_ident(PackageTarget::default()),
+        ).unwrap().id,
+    )?;
+
     let cmd = Exec::cmd("sudo")
         .arg("-E")
         .arg(HAB_BINARY.as_path())
