@@ -351,6 +351,8 @@ pub(crate) fn native_package_build(
             .arg("-e")
             .arg("HAB_OUTPUT_PATH=/output")
             .arg("-e")
+            .arg(format!("HAB_ORIGIN={}", build_step.plan_ctx.id.as_ref().origin))
+            .arg("-e")
             .arg(format!(
                 "BUILD_PKG_TARGET={}",
                 PackageTarget::default().to_string()
@@ -386,6 +388,7 @@ pub(crate) fn native_package_build(
             .arg(relative_plan_context)
             .env("HAB_FEAT_NATIVE_PACKAGE_SUPPORT", "1")
             .env("HAB_OUTPUT_PATH", tmp_dir.path())
+            .env("HAB_ORIGIN", build_step.plan_ctx.id.as_ref().origin.to_string())
             .env("BUILD_PKG_TARGET", PackageTarget::default().to_string())
             .cwd(build_step.repo_ctx.path.as_ref())
             .stdin(NullFile)
@@ -556,6 +559,7 @@ pub(crate) fn bootstrap_package_build(
         .arg("-R")
         .arg(relative_plan_context)
         .env("HAB_ORIGIN_KEYS", origin_keys)
+        .env("HAB_ORIGIN", build_step.plan_ctx.id.as_ref().origin.to_string())
         .env("HAB_LICENSE", "accept-no-persist")
         .env("HAB_STUDIO_SUP", "false")
         .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
@@ -727,6 +731,7 @@ pub(crate) fn standard_package_build(
         .arg("-R")
         .arg(relative_plan_context)
         .env("HAB_ORIGIN_KEYS", origin_keys)
+        .env("HAB_ORIGIN", build_step.plan_ctx.id.as_ref().origin.to_string())
         .env("HAB_LICENSE", "accept-no-persist")
         .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
         .env("HAB_STUDIO_SUP", "false")
