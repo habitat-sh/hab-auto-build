@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 use tracing::{error, info};
 
 use crate::core::{
-    AutoBuildConfig, AutoBuildContext, DependencyChangeCause, PackageDepGlob,
+    AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, DependencyChangeCause, PackageDepGlob,
     PackageTarget, RepoChanges,
 };
 
@@ -21,6 +21,9 @@ pub(crate) struct Params {
     /// Output format
     #[arg(value_enum, short = 'f', long, default_value_t = OutputFormat::Plain)]
     format: OutputFormat,
+    /// Method to use to detect changes to packages
+    #[arg(value_enum, short = 'm', long, default_value_t = ChangeDetectionMode::Disk)]
+    change_detection_mode: ChangeDetectionMode,
     /// Display reasons for changes
     #[arg(short = 'e', long, default_value_t = false)]
     explain: bool,
@@ -51,7 +54,11 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         );
         return Ok(());
     }
-    let changes = run_context.changes(&package_indices, PackageTarget::default());
+    let changes = run_context.changes(
+        &package_indices,
+        args.change_detection_mode,
+        PackageTarget::default(),
+    );
 
     match args.format {
         OutputFormat::Plain => output_plain(changes, args.explain)?,
@@ -98,28 +105,54 @@ fn output_plain(repo_statuses: Vec<RepoChanges<'_>>, explain: bool) -> Result<()
                             }
                             DependencyChangeCause::PlanContextChanged {
                                 latest_plan_artifact,
-                                files_changed,
+                                files_changed_on_disk,
+                                files_changed_on_git,
                             } => {
-                                info!(target: "user-ui", "    Plan files modified since last artifact was built");
-                                for file in files_changed {
-                                    info!(target: "user-ui",
-                                        "      - [{}] {} {}",
-                                        file.last_modified_at.blue(),
-                                        file.path.as_ref().display(),
-                                        format!(
-                                            "({} later)",
-                                            HumanTime::from(
-                                                file.last_modified_at.signed_duration_since(
-                                                    latest_plan_artifact.created_at
+                                if !files_changed_on_disk.is_empty() {
+                                    info!(target: "user-ui", "    Plan files modified on disk since last artifact was built");
+                                    for file in files_changed_on_disk {
+                                        info!(target: "user-ui",
+                                            "      - [{}] {} {}",
+                                            file.last_modified_at.blue(),
+                                            file.path.as_ref().display(),
+                                            format!(
+                                                "({} later)",
+                                                HumanTime::from(
+                                                    file.last_modified_at.signed_duration_since(
+                                                        latest_plan_artifact.created_at
+                                                    )
+                                                )
+                                                .to_text_en(
+                                                    Accuracy::Rough,
+                                                    chrono_humanize::Tense::Present
                                                 )
                                             )
-                                            .to_text_en(
-                                                Accuracy::Rough,
-                                                chrono_humanize::Tense::Present
+                                            .italic()
+                                        );
+                                    }
+                                }
+                                if !files_changed_on_git.is_empty() {
+                                    info!(target: "user-ui", "    Plan files modified on git since last artifact was built");
+                                    for file in files_changed_on_git {
+                                        info!(target: "user-ui",
+                                            "      - [{}] {} {}",
+                                            file.last_modified_at.blue(),
+                                            file.path.as_ref().display(),
+                                            format!(
+                                                "({} later)",
+                                                HumanTime::from(
+                                                    file.last_modified_at.signed_duration_since(
+                                                        latest_plan_artifact.created_at
+                                                    )
+                                                )
+                                                .to_text_en(
+                                                    Accuracy::Rough,
+                                                    chrono_humanize::Tense::Present
+                                                )
                                             )
-                                        )
-                                        .italic()
-                                    );
+                                            .italic()
+                                        );
+                                    }
                                 }
                             }
                             DependencyChangeCause::DependencyArtifactsUpdated {

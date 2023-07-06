@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Display,
     fs::File,
     io::Read,
@@ -27,8 +27,8 @@ use tracing::{debug, error, info, trace};
 
 use crate::{
     check::{
-        ArtifactCheck, Checker, CheckerContext, PlanContextConfig, LeveledArtifactCheckViolation,
-        LeveledSourceCheckViolation, SourceCheck,
+        ArtifactCheck, Checker, CheckerContext, LeveledArtifactCheckViolation,
+        LeveledSourceCheckViolation, PlanContextConfig, SourceCheck,
     },
     core::{
         ArtifactCache, ArtifactCachePath, Dependency, DependencyDepth, DependencyDirection,
@@ -38,10 +38,11 @@ use crate::{
 };
 
 use super::{
-    habitat::{self, BuildError}, DepGraph, DependencyChangeCause, PackageBuildVersion, PackageDepGlob, PackageDepIdent,
-    PackageIdent, PackageName, PackageOrigin, PackageSha256Sum, PackageSource, PackageTarget,
-    PackageVersion, PlanContext, PlanContextID, PlanScannerBuilder, RepoConfig, RepoContext,
-    RepoContextID, DepGraphData,
+    habitat::{self, BuildError},
+    ChangeDetectionMode, DepGraph, DepGraphData, DependencyChangeCause, PackageBuildVersion,
+    PackageDepGlob, PackageDepIdent, PackageIdent, PackageName, PackageOrigin, PackageSha256Sum,
+    PackageSource, PackageTarget, PackageVersion, PlanContext, PlanContextID,
+    PlanContextPathGitSyncStatus, PlanScannerBuilder, RepoConfig, RepoContext, RepoContextID,
 };
 
 lazy_static! {
@@ -215,7 +216,7 @@ pub(crate) struct BuildStep<'a> {
 pub(crate) struct BuildStepResult {
     pub artifact_ident: PackageIdent,
     pub artifact_violations: Vec<LeveledArtifactCheckViolation>,
-    pub build_log: PathBuf
+    pub build_log: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -223,10 +224,8 @@ pub(crate) enum BuildStepError {
     #[error("Failed to complete build")]
     Build(#[from] BuildError),
     #[error("Failed to execute build step due to unexpected error")]
-    Unexpected(#[from] color_eyre::eyre::Error)
+    Unexpected(#[from] color_eyre::eyre::Error),
 }
-
-
 
 pub(crate) struct BuildPlan<'a> {
     pub check_steps: Vec<CheckStep<'a>>,
@@ -255,6 +254,17 @@ pub(crate) enum RemoveError {
     #[error(
         "Encountered an unexpected error while trying to remove the package from the change list"
     )]
+    UnexpectedError(#[from] color_eyre::eyre::Error),
+}
+
+pub(crate) struct PlanContextGitSyncStatus {
+    pub id: PlanContextID,
+    pub file_statuses: Vec<PlanContextPathGitSyncStatus>,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum GitSyncError {
+    #[error("Encountered an unexpected error while trying to sync the package changes with git")]
     UnexpectedError(#[from] color_eyre::eyre::Error),
 }
 
@@ -789,9 +799,14 @@ impl AutoBuildContext {
             .collect())
     }
 
-    pub fn changes(&self, package_indices: &[NodeIndex], build_target: PackageTarget) -> Vec<RepoChanges<'_>> {
+    pub fn changes(
+        &self,
+        package_indices: &[NodeIndex],
+        change_detection_mode: ChangeDetectionMode,
+        build_target: PackageTarget,
+    ) -> Vec<RepoChanges<'_>> {
         self.dep_graph
-            .detect_changes_in_repos(build_target)
+            .detect_changes_in_repos(change_detection_mode, build_target)
             .into_iter()
             .map(|(repo_ctx_id, changes)| RepoChanges {
                 repo: self.repos.get(&repo_ctx_id).unwrap(),
@@ -830,10 +845,14 @@ impl AutoBuildContext {
         &mut self,
         connection: &mut SqliteConnection,
         plan_node_indices: &[NodeIndex],
-        build_target: PackageTarget
+        build_target: PackageTarget,
     ) -> Result<Vec<AddStatus>, AddError> {
         let mut results = Vec::new();
-        let plan_node_changes = self.dep_graph.detect_changes_in_deps(plan_node_indices, build_target);
+        let plan_node_changes = self.dep_graph.detect_changes_in_deps(
+            plan_node_indices,
+            ChangeDetectionMode::Disk,
+            build_target,
+        );
         let artifact_cache = self.artifact_cache.read().unwrap();
         for plan_node_index in plan_node_indices {
             match self.dep_graph.dep_mut(*plan_node_index) {
@@ -855,7 +874,7 @@ impl AutoBuildContext {
                             None,
                             Some(latest_plan_artifact),
                         )?;
-                        if plan_ctx.files_changed.is_empty() {
+                        if plan_ctx.files_changed_on_disk.is_empty() {
                             let alternate_modified_at =
                                 latest_plan_artifact.created_at + Duration::seconds(1);
                             store::file_alternate_modified_at_put(
@@ -881,11 +900,48 @@ impl AutoBuildContext {
                         results.push(AddStatus::AlreadyAdded(plan_ctx.id.clone()));
                     }
                     assert!({
-                        let plan_node_changes =
-                            self.dep_graph.detect_changes_in_deps(&[*plan_node_index], build_target);
+                        let plan_node_changes = self.dep_graph.detect_changes_in_deps(
+                            &[*plan_node_index],
+                            ChangeDetectionMode::Disk,
+                            build_target,
+                        );
                         let causes = plan_node_changes.get(&plan_node_index);
                         causes.is_some()
                     })
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn sync_plans_with_git(
+        &mut self,
+        connection: &mut SqliteConnection,
+        plan_node_indices: &[NodeIndex],
+        is_dry_run: bool,
+        build_target: PackageTarget,
+    ) -> Result<BTreeMap<RepoContextID, Vec<PlanContextGitSyncStatus>>, GitSyncError> {
+        let mut results: BTreeMap<RepoContextID, Vec<PlanContextGitSyncStatus>> = BTreeMap::new();
+        for plan_node_index in plan_node_indices {
+            match self.dep_graph.dep_mut(*plan_node_index) {
+                Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
+                Dependency::LocalPlan(ref mut plan_ctx) => {
+                    let sync_results = plan_ctx.sync_changes_with_git(is_dry_run)?;
+                    if !sync_results.is_empty() {
+                        results.entry(plan_ctx.repo_id.clone()).or_default().push(
+                            PlanContextGitSyncStatus {
+                                id: plan_ctx.id.clone(),
+                                file_statuses: sync_results,
+                            },
+                        );
+                    }
+                    if !is_dry_run {
+                        // Delete any modifications for the plan context that may be present
+                        store::plan_context_alternate_modified_at_delete(
+                            connection,
+                            &plan_ctx.context_path,
+                        )?;
+                    }
                 }
             }
         }
@@ -899,7 +955,11 @@ impl AutoBuildContext {
         build_target: PackageTarget,
     ) -> Result<Vec<RemoveStatus>, RemoveError> {
         let mut results = Vec::new();
-        let plan_node_changes = self.dep_graph.detect_changes_in_deps(plan_node_indices, build_target);
+        let plan_node_changes = self.dep_graph.detect_changes_in_deps(
+            plan_node_indices,
+            ChangeDetectionMode::Disk,
+            build_target,
+        );
         let artifact_cache = self.artifact_cache.read().unwrap();
         for plan_node_index in plan_node_indices {
             match self.dep_graph.dep_mut(*plan_node_index) {
@@ -939,8 +999,8 @@ impl AutoBuildContext {
                             None,
                             artifact_cache.latest_plan_artifact(&plan_ctx.id),
                         )?;
-                        if !plan_ctx.files_changed.is_empty() {
-                            for changed_file in plan_ctx.files_changed.iter() {
+                        if !plan_ctx.files_changed_on_disk.is_empty() {
+                            for changed_file in plan_ctx.files_changed_on_disk.iter() {
                                 store::file_alternate_modified_at_put(
                                     connection,
                                     &plan_ctx.context_path,
@@ -960,8 +1020,11 @@ impl AutoBuildContext {
                         results.push(RemoveStatus::AlreadyRemoved(plan_ctx.id.clone()));
                     }
                     assert!({
-                        let plan_node_changes =
-                            self.dep_graph.detect_changes_in_deps(&[*plan_node_index], build_target);
+                        let plan_node_changes = self.dep_graph.detect_changes_in_deps(
+                            &[*plan_node_index],
+                            ChangeDetectionMode::Disk,
+                            build_target,
+                        );
                         let causes = plan_node_changes.get(&plan_node_index);
                         causes.is_none()
                     })
@@ -974,10 +1037,13 @@ impl AutoBuildContext {
     pub fn build_plan_generate(
         &self,
         package_indices: Vec<NodeIndex>,
+        change_detection_mode: ChangeDetectionMode,
         build_target: PackageTarget,
         allow_remote: bool,
     ) -> Result<BuildPlan> {
-        let base_changes_graph = self.dep_graph.detect_changes(build_target);
+        let base_changes_graph = self
+            .dep_graph
+            .detect_changes(change_detection_mode, build_target);
 
         let mut changes_graph = base_changes_graph.filter_map(
             |_node_index, node| Some(node),
@@ -1189,7 +1255,10 @@ impl AutoBuildContext {
         ))
     }
 
-    pub fn build_step_execute(&self, build_step: &BuildStep<'_>) -> Result<BuildStepResult, BuildStepError> {
+    pub fn build_step_execute(
+        &self,
+        build_step: &BuildStep<'_>,
+    ) -> Result<BuildStepResult, BuildStepError> {
         let mut artifact_cache = self.artifact_cache.write().unwrap();
         let start = Instant::now();
         let build_output = {
@@ -1229,7 +1298,7 @@ impl AutoBuildContext {
         Ok(BuildStepResult {
             artifact_ident,
             artifact_violations,
-            build_log: build_output.build_log
+            build_log: build_output.build_log,
         })
     }
 }

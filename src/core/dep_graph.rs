@@ -4,7 +4,8 @@ use super::{
     ArtifactCache, BuildStudioConfig, PackageBuildIdent, PackageBuildVersion,
     PackageDepGlobMatcher, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
     PackageRelease, PackageResolvedDepIdent, PackageTarget, PackageVersion, PlanContext,
-    PlanContextFileChange, PlanContextID, PlanContextLatestArtifact, PlanFilePath, RepoContextID,
+    PlanContextFileChangeOnDisk, PlanContextFileChangeOnGit, PlanContextID,
+    PlanContextLatestArtifact, PlanFilePath, RepoContextID,
 };
 
 use clap::ValueEnum;
@@ -149,7 +150,8 @@ pub(crate) struct DependencyArtifactUpdated {
 pub(crate) enum DependencyChangeCause {
     PlanContextChanged {
         latest_plan_artifact: PlanContextLatestArtifact,
-        files_changed: Vec<PlanContextFileChange>,
+        files_changed_on_disk: Vec<PlanContextFileChangeOnDisk>,
+        files_changed_on_git: Vec<PlanContextFileChangeOnGit>,
     },
     DependencyArtifactsUpdated {
         latest_plan_artifact: PlanContextLatestArtifact,
@@ -210,6 +212,12 @@ impl From<&DepGraph> for DepGraphData {
 pub(crate) struct DepGraph {
     pub build_graph: StableGraph<Dependency, DependencyType, Directed>,
     pub known_versions: PackageVersionList,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ChangeDetectionMode {
+    Git,
+    Disk,
 }
 
 impl DepGraph {
@@ -559,10 +567,11 @@ impl DepGraph {
     pub fn detect_changes_in_deps<'a>(
         &self,
         node_indices: impl IntoIterator<Item = &'a NodeIndex>,
+        change_detection_mode: ChangeDetectionMode,
         build_target: PackageTarget,
     ) -> HashMap<NodeIndex, Vec<DependencyChangeCause>> {
         let node_indices = node_indices.into_iter().collect::<Vec<_>>();
-        let changes = self.detect_changes(build_target);
+        let changes = self.detect_changes(change_detection_mode, build_target);
         changes
             .node_references()
             .filter(|(key, _)| node_indices.contains(&key))
@@ -572,9 +581,10 @@ impl DepGraph {
 
     pub fn detect_changes_in_repos(
         &self,
+        change_detection_mode: ChangeDetectionMode,
         build_target: PackageTarget,
     ) -> BTreeMap<RepoContextID, HashMap<NodeIndex, Vec<DependencyChangeCause>>> {
-        let changed_deps = self.detect_changes(build_target);
+        let changed_deps = self.detect_changes(change_detection_mode, build_target);
         let mut changed_deps_by_repo: BTreeMap<
             RepoContextID,
             HashMap<NodeIndex, Vec<DependencyChangeCause>>,
@@ -594,7 +604,11 @@ impl DepGraph {
         changed_deps_by_repo
     }
 
-    pub fn detect_changes(&self, build_target: PackageTarget) -> StableGraph<Vec<DependencyChangeCause>, DependencyType> {
+    pub fn detect_changes(
+        &self,
+        change_detection_mode: ChangeDetectionMode,
+        build_target: PackageTarget,
+    ) -> StableGraph<Vec<DependencyChangeCause>, DependencyType> {
         let dep_types = [
             DependencyType::Build,
             DependencyType::Runtime,
@@ -613,19 +627,35 @@ impl DepGraph {
                     Dependency::LocalPlan(PlanContext {
                         id,
                         latest_artifact,
-                        files_changed,
+                        files_changed_on_disk,
+                        files_changed_on_git,
                         ..
                     }) => {
                         if id.as_ref().target != build_target {
                             continue;
                         }
                         if let Some(latest_artifact) = latest_artifact {
-                            if !files_changed.is_empty() {
-                                causes.push(DependencyChangeCause::PlanContextChanged {
-                                    latest_plan_artifact: latest_artifact.clone(),
-                                    files_changed: files_changed.clone(),
-                                });
+                            match change_detection_mode {
+                                ChangeDetectionMode::Git => {
+                                    if !files_changed_on_git.is_empty() {
+                                        causes.push(DependencyChangeCause::PlanContextChanged {
+                                            latest_plan_artifact: latest_artifact.clone(),
+                                            files_changed_on_disk: Vec::new(),
+                                            files_changed_on_git: files_changed_on_git.clone(),
+                                        });
+                                    }
+                                }
+                                ChangeDetectionMode::Disk => {
+                                    if !files_changed_on_disk.is_empty() {
+                                        causes.push(DependencyChangeCause::PlanContextChanged {
+                                            latest_plan_artifact: latest_artifact.clone(),
+                                            files_changed_on_disk: files_changed_on_disk.clone(),
+                                            files_changed_on_git: Vec::new(),
+                                        });
+                                    }
+                                }
                             }
+
                             let mut updated_dep_artifacts = Vec::new();
                             for dep_node_index in self
                                 .build_graph

@@ -11,7 +11,7 @@ use crate::{
     cli::check::output_violations,
     core::{
         habitat::BuildError, AutoBuildConfig, AutoBuildContext, BuildPlan, BuildStep,
-        BuildStepError, Dependency, DownloadStatus, PackageDepGlob, PackageTarget, PlanCheckStatus,
+        BuildStepError, Dependency, DownloadStatus, PackageDepGlob, PackageTarget, PlanCheckStatus, ChangeDetectionMode,
     },
 };
 
@@ -35,6 +35,9 @@ pub(crate) struct Params {
     /// Do a dry run of the build, does not actually build anything
     #[arg(short = 'd', long)]
     dry_run: bool,
+    /// Method to use to detect changes to packages
+    #[arg(value_enum, short = 'm', long, default_value_t = ChangeDetectionMode::Disk)]
+    change_detection_mode: ChangeDetectionMode,
     /// Allow use of packages from a remote habitat builder instance specified by HAB_BLDR_URL
     #[arg(short = 'r', long)]
     allow_remote: bool,
@@ -64,7 +67,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         );
         return Ok(());
     }
-    let build_plan = run_context.build_plan_generate(package_indices, PackageTarget::default(), args.allow_remote)?;
+    let build_plan = run_context.build_plan_generate(package_indices, args.change_detection_mode, PackageTarget::default(), args.allow_remote)?;
     if args.dry_run {
         match args.format {
             OutputFormat::Plain => output_plain(build_plan)?,

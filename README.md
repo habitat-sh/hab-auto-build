@@ -79,6 +79,23 @@ hab-auto-build check <plan>
 
 ## Advanced Usage
 
+### Interacting with Git Repositories
+
+Habitat Auto Build, by default, determines if a plan needs a rebuild based on the "last modified" timestamp of any file or directory within the plan context folder. If this timestamp is later than the release timestamp of the last package build, a rebuild is considered necessary. This can sometimes be inconvenient, as file modification times can change due to reasons other than actual content modification. For instance, checking out changes to your plan files from another branch will alter the "last modified" times.
+
+To address this, there are a few options to streamline the process:
+
+```bash
+# Build based on the modification times for files using git, not the filesystem
+hab-auto-build build -m git
+# Synchronize the file "last modified" time with the git commit timestamps
+hab-auto-build git-sync
+# Dry run of synchronizing the file "last modified" time with the git commit timestamps
+hab-auto-build git-sync -d
+```
+
+We generally recommend running `hab-auto-build git-sync` after a fresh checkout or when switching branches. This ensures that the need for a rebuild is assessed based on actual changes in the content, not merely due to changes in the file modification time caused by operations like checkout or branch switching.
+
 ### Working with multiple plans in commands
 
 Most `hab-auto-build` commands can operate on a list of plans. To specify multiple plans, you can use glob expressions, list each plan name separately, or even combine both methods.

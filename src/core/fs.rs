@@ -1,4 +1,5 @@
-use color_eyre::eyre::{Result, Context};
+use chrono::{DateTime, Utc, NaiveDateTime};
+use color_eyre::eyre::{Context, Result, eyre};
 use globset::{Glob, GlobSetBuilder};
 use infer::Infer;
 use lazy_static::lazy_static;
@@ -193,7 +194,10 @@ pub struct GlobSetExpression {
 
 impl Default for GlobSetExpression {
     fn default() -> Self {
-        Self { patterns: Default::default(), globset: Default::default() }
+        Self {
+            patterns: Default::default(),
+            globset: Default::default(),
+        }
     }
 }
 
@@ -221,5 +225,40 @@ impl TryFrom<Vec<String>> for GlobSetExpression {
 impl Into<Vec<String>> for GlobSetExpression {
     fn into(self) -> Vec<String> {
         self.patterns
+    }
+}
+
+pub trait Metadata {
+    fn last_modifed_at(&self) -> Result<DateTime<Utc>>;
+    fn set_last_modifed_at(&self, modified_at: DateTime<Utc>) -> Result<()>;
+}
+
+impl<T> Metadata for T
+where
+    T: AsRef<Path>,
+{
+    /// Cross platform method to fetch last modified time for a path
+    fn last_modifed_at(&self) -> Result<DateTime<Utc>> {
+        let modified_at =
+            filetime::FileTime::from_last_modification_time(&self.as_ref().metadata()?);
+        Ok(DateTime::<Utc>::from_utc(
+            NaiveDateTime::from_timestamp_opt(
+                modified_at.unix_seconds(),
+                modified_at.nanoseconds(),
+            ).ok_or(eyre!("Last modification timestamp out of range"))?,
+            Utc,
+        ))
+    }
+
+    /// Cross platform method to set last modified time for a path
+    fn set_last_modifed_at(&self, modified_at: DateTime<Utc>) -> Result<()> {
+        filetime::set_file_mtime(
+            self.as_ref(),
+            filetime::FileTime::from_unix_time(
+                modified_at.timestamp(),
+                modified_at.timestamp_subsec_nanos(),
+            ),
+        )?;
+        Ok(())
     }
 }

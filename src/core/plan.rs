@@ -7,14 +7,12 @@ use std::{
     sync::mpsc::Sender,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use color_eyre::{
     eyre::{eyre, Context, Result},
     Help, SectionExt,
 };
-use diesel::{
-    SqliteConnection,
-};
+use diesel::{sql_types::Date, SqliteConnection};
 use ignore::{ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 
 use lazy_static::lazy_static;
@@ -29,8 +27,8 @@ use crate::{
 };
 
 use super::{
-    ArtifactCache, ArtifactContext, PackageBuildIdent, PackageBuildVersion, PackageDepIdent,
-    PackageIdent, PackageName, PackageOrigin, PackageResolvedDepIdent,
+    ArtifactCache, ArtifactContext, Metadata, PackageBuildIdent, PackageBuildVersion,
+    PackageDepIdent, PackageIdent, PackageName, PackageOrigin, PackageResolvedDepIdent,
     PackageSource, PackageTarget, RepoContext, RepoContextID,
 };
 
@@ -179,7 +177,8 @@ pub(crate) struct PlanContext {
     pub deps: Vec<PackageResolvedDepIdent>,
     pub build_deps: Vec<PackageResolvedDepIdent>,
     pub latest_artifact: Option<PlanContextLatestArtifact>,
-    pub files_changed: Vec<PlanContextFileChange>,
+    pub files_changed_on_disk: Vec<PlanContextFileChangeOnDisk>,
+    pub files_changed_on_git: Vec<PlanContextFileChangeOnGit>,
     pub is_native: bool,
     pub plan_config: Option<PlanContextConfig>,
 }
@@ -202,10 +201,21 @@ pub(crate) struct PlanContextLatestArtifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct PlanContextFileChange {
+pub(crate) struct PlanContextFileChangeOnDisk {
     pub last_modified_at: DateTime<Utc>,
     pub real_last_modified_at: DateTime<Utc>,
     pub path: PlanContextFilePath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PlanContextFileChangeOnGit {
+    pub last_modified_at: DateTime<Utc>,
+    pub path: PlanContextFilePath,
+}
+
+pub(crate) enum PlanContextPathGitSyncStatus {
+    Synced(PathBuf, DateTime<Utc>, DateTime<Utc>),
+    LocallyModified(PathBuf, DateTime<Utc>),
 }
 
 impl PlanContext {
@@ -261,7 +271,8 @@ impl PlanContext {
                 target: target.to_owned(),
             });
             let plan_config_path = plan_path.plan_config_path();
-            let plan_config = if let Ok(mut file) = std::fs::File::open(plan_config_path.as_path()) {
+            let plan_config = if let Ok(mut file) = std::fs::File::open(plan_config_path.as_path())
+            {
                 let mut data = String::new();
                 file.read_to_string(&mut data)?;
                 match PlanContextConfig::from_str(data.as_str())
@@ -286,9 +297,7 @@ impl PlanContext {
                 repo_id: repo_ctx.id.clone(),
                 is_native: repo_ctx.is_native_plan(&plan_ctx_path),
                 context_path: plan_ctx_path.clone(),
-                target_context_last_modified_at: DateTime::<Utc>::from(
-                    plan_target_ctx_path.as_ref().metadata()?.modified()?,
-                ),
+                target_context_last_modified_at: plan_target_ctx_path.last_modifed_at()?,
                 target_context_path: plan_target_ctx_path.clone(),
                 plan_path: plan_path.clone(),
                 source: raw_data.source,
@@ -304,7 +313,8 @@ impl PlanContext {
                     .map(|d| d.to_resolved_dep_ident(target.to_owned()))
                     .collect(),
                 latest_artifact: None,
-                files_changed: Vec::new(),
+                files_changed_on_disk: Vec::new(),
+                files_changed_on_git: Vec::new(),
                 plan_config,
             };
             let latest_artifact = artifact_cache.latest_plan_artifact(&plan_ctx.id);
@@ -331,7 +341,7 @@ impl PlanContext {
             .standard_filters(false)
             .sort_by_file_path(|a, b| a.cmp(b))
             .build();
-        self.files_changed = Vec::new();
+        self.files_changed_on_disk = Vec::new();
         self.latest_artifact = artifact_ctx.map(|artifact_ctx| PlanContextLatestArtifact {
             created_at: artifact_ctx.created_at,
             ident: artifact_ctx.id.clone(),
@@ -367,53 +377,74 @@ impl PlanContext {
                         continue;
                     }
 
-                    match entry.metadata() {
-                        Ok(metadata) => match metadata.modified() {
-                            Ok(modified_at) => {
-                                let real_last_modified_at = DateTime::<Utc>::from(modified_at);
-                                if entry.path() == self.target_context_path.as_ref() {
-                                    self.target_context_last_modified_at = real_last_modified_at;
-                                }
-                                let alternate_modified_at =
-                                    if let Some(connection) = connection.as_mut() {
-                                        store::file_alternate_modified_at_get(
-                                            connection,
-                                            &self.context_path,
-                                            entry.path(),
-                                            real_last_modified_at,
-                                        )?
-                                    } else if let Some(modification_index) = modification_index {
-                                        modification_index.file_alternate_modified_at_get(
-                                            &self.context_path,
-                                            entry.path(),
-                                            real_last_modified_at,
-                                        )
-                                    } else {
-                                        panic!("No modification source provided")
-                                    };
-                                let modified_at =
-                                    if let Some(alternate_modified_at) = alternate_modified_at {
-                                        alternate_modified_at
-                                    } else {
-                                        real_last_modified_at
-                                    };
-                                if let Some(artifact_ctx) = artifact_ctx {
-                                    if modified_at > artifact_ctx.created_at {
-                                        self.files_changed.push(PlanContextFileChange {
+                    match entry.path().last_modifed_at() {
+                        Ok(real_last_modified_at) => {
+                            if entry.path() == self.target_context_path.as_ref() {
+                                self.target_context_last_modified_at = real_last_modified_at;
+                            }
+                            let alternate_modified_at =
+                                if let Some(connection) = connection.as_mut() {
+                                    store::file_alternate_modified_at_get(
+                                        connection,
+                                        &self.context_path,
+                                        entry.path(),
+                                        real_last_modified_at,
+                                    )?
+                                } else if let Some(modification_index) = modification_index {
+                                    modification_index.file_alternate_modified_at_get(
+                                        &self.context_path,
+                                        entry.path(),
+                                        real_last_modified_at,
+                                    )
+                                } else {
+                                    panic!("No modification source provided")
+                                };
+                            let modified_at =
+                                if let Some(alternate_modified_at) = alternate_modified_at {
+                                    alternate_modified_at
+                                } else {
+                                    real_last_modified_at
+                                };
+                            let git_modified_at: Option<DateTime<Utc>> = {
+                                let mut child = std::process::Command::new("git")
+                                    .arg("log")
+                                    .arg("-1")
+                                    .arg("--pretty=%ci")
+                                    .arg(entry.path())
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::piped())
+                                    .stderr(Stdio::piped())
+                                    .current_dir(self.context_path.as_ref())
+                                    .spawn()?;
+                                let output = child.wait_with_output()?;
+                                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                                DateTime::parse_from_str(stdout.trim(), "%Y-%m-%d %H:%M:%S %z")
+                                    .ok()
+                                    .map(|value| DateTime::from_utc(value.naive_utc(), Utc))
+                            };
+
+                            if let Some(artifact_ctx) = artifact_ctx {
+                                if modified_at > artifact_ctx.created_at {
+                                    self.files_changed_on_disk
+                                        .push(PlanContextFileChangeOnDisk {
                                             last_modified_at: modified_at,
                                             real_last_modified_at,
+                                            path: PlanContextFilePath(entry.path().to_path_buf()),
+                                        })
+                                }
+                                if let Some(modified_at) = git_modified_at {
+                                    if modified_at > artifact_ctx.created_at {
+                                        self.files_changed_on_git.push(PlanContextFileChangeOnGit {
+                                            last_modified_at: modified_at,
                                             path: PlanContextFilePath(entry.path().to_path_buf()),
                                         })
                                     }
                                 }
                             }
-                            Err(err) => {
-                                error!("Failed to read last modified time for entry '{}' in plan context: {}", entry.path().display(), err);
-                            }
-                        },
+                        }
                         Err(err) => {
                             error!(
-                                "Failed to read metadata for entry '{}' in plan context: {}",
+                                "Failed to read last modified time for entry '{}' in plan context: {}",
                                 entry.path().display(),
                                 err
                             );
@@ -426,6 +457,78 @@ impl PlanContext {
             }
         }
         Ok(())
+    }
+
+    pub fn sync_changes_with_git(
+        &mut self,
+        is_dry_run: bool,
+    ) -> Result<Vec<PlanContextPathGitSyncStatus>> {
+        let mut results = Vec::new();
+        let plan_ctx_walker = WalkBuilder::new(self.context_path.as_ref())
+            .standard_filters(false)
+            .sort_by_file_path(|a, b| a.cmp(b))
+            .build();
+        for entry in plan_ctx_walker {
+            match entry {
+                Ok(entry) => {
+                    let disk_modified_at = entry.path().last_modifed_at()?;
+                    let is_locally_modified = {
+                        let mut child = std::process::Command::new("git")
+                            .arg("diff")
+                            .arg("--quiet")
+                            .arg("--exit-code")
+                            .arg(entry.path())
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .current_dir(self.context_path.as_ref())
+                            .spawn()?;
+                        let exit_status = child.wait()?;
+                        !exit_status.success()
+                    };
+                    if !is_locally_modified {
+                        let git_modified_at: Option<DateTime<Utc>> = {
+                            let mut child = std::process::Command::new("git")
+                                .arg("log")
+                                .arg("-1")
+                                .arg("--pretty=%ci")
+                                .arg(entry.path())
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::piped())
+                                .stderr(Stdio::piped())
+                                .current_dir(self.context_path.as_ref())
+                                .spawn()?;
+                            let output = child.wait_with_output()?;
+                            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                            DateTime::parse_from_str(stdout.trim(), "%Y-%m-%d %H:%M:%S %z")
+                                .ok()
+                                .map(|value| DateTime::from_utc(value.naive_utc(), Utc))
+                        };
+                        if let Some(git_modified_at) = git_modified_at {
+                            if git_modified_at != disk_modified_at {
+                                if !is_dry_run {
+                                    entry.path().set_last_modifed_at(git_modified_at)?;
+                                }
+                                results.push(PlanContextPathGitSyncStatus::Synced(
+                                    Path::new(".").join(entry.path().strip_prefix(&self.context_path)?),
+                                    disk_modified_at,
+                                    git_modified_at,
+                                ));
+                            }
+                        }
+                    } else {
+                        results.push(PlanContextPathGitSyncStatus::LocallyModified(
+                            Path::new(".").join(entry.path().strip_prefix(&self.context_path)?),
+                            disk_modified_at,
+                        ));
+                    }
+                }
+                Err(err) => {
+                    error!("Failed to read entry in plan context: {}", err);
+                }
+            }
+        }
+        Ok(results)
     }
 }
 

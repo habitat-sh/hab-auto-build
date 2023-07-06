@@ -5,6 +5,7 @@ mod check;
 mod changes;
 mod compare;
 mod download;
+mod git_sync;
 mod output;
 mod remove;
 mod server;
@@ -40,6 +41,8 @@ enum Commands {
     Add(add::Params),
     /// Remove a plan from the list of changed plans
     Remove(remove::Params),
+    /// Sync plan file timestamps with git commit timestamps
+    GitSync(git_sync::Params),
     /// Start a server to visualize the package build graph
     Server(server::Params)
 }
@@ -53,10 +56,11 @@ impl Cli {
             Commands::Check(args) => check::execute(args),
             Commands::Compare(args) => compare::execute(args),
             Commands::Download(args) => download::execute(args),
+            Commands::GitSync(args) => git_sync::execute(args),
             Commands::Remove(args) => remove::execute(args),
             Commands::Build(args) => build::execute(args),
             Commands::Analyze(args) => analyze::execute(args),
-            Commands::Server(args) => server::execute(args)
+            Commands::Server(args) => server::execute(args),
         }
     }
 }
