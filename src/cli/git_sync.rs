@@ -5,8 +5,7 @@ use owo_colors::OwoColorize;
 use tracing::{error, info};
 
 use crate::core::{
-    AddStatus, AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget,
-    PlanContextPathGitSyncStatus,
+    AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget, PlanContextPathGitSyncStatus,
 };
 use color_eyre::eyre::{eyre, Context, Result};
 
@@ -47,7 +46,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     }
 
     run_context.get_connection()?.exclusive_transaction(|connection| {
-        match run_context.sync_plans_with_git(connection, &package_indices, args.dry_run, PackageTarget::default()) {
+        match run_context.sync_plans_with_git(connection, &package_indices, args.dry_run) {
             Ok(repo_statuses) => {
                 for (repo_id, plan_statuses ) in repo_statuses {
                     info!(target: "user-ui", "{}:", repo_id.to_string().blue());

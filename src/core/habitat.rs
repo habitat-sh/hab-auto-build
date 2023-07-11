@@ -1,18 +1,17 @@
 use super::{
-    ArtifactCache, ArtifactCachePath, ArtifactContext, ArtifactPath, BuildStep, FSRootPath,
-    HabitatRootPath, HabitatSourceCachePath, PlanContextID, PackageIdent,
+    ArtifactCache, ArtifactCachePath, ArtifactContext, BuildStep, FSRootPath, HabitatRootPath,
+    HabitatSourceCachePath, PackageIdent, PlanContextID,
 };
 use crate::{check::PlanContextConfig, core::PackageTarget, store::Store};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use color_eyre::eyre::{eyre, Context, Result};
 use lazy_static::lazy_static;
 use std::{
     env,
     path::{Path, PathBuf},
     process::Stdio,
-    time::SystemTime,
 };
-use subprocess::{Exec, ExitStatus, NullFile, Redirection};
+use subprocess::{Exec, NullFile, Redirection};
 use tempdir::TempDir;
 use thiserror::Error;
 use tracing::{debug, error, trace};
@@ -20,7 +19,7 @@ use which::which;
 
 lazy_static! {
     static ref HAB_BINARY: PathBuf =
-        { which("hab").expect("Failed to find hab binary in environment") };
+        which("hab").expect("Failed to find hab binary in environment");
 }
 
 pub(crate) fn install_artifact_offline(package_ident: &PackageIdent) -> Result<()> {
@@ -30,7 +29,11 @@ pub(crate) fn install_artifact_offline(package_ident: &PackageIdent) -> Result<(
         .arg(HAB_BINARY.as_path())
         .arg("pkg")
         .arg("install")
-        .arg(ArtifactCachePath::default().artifact_path(package_ident).as_ref())
+        .arg(
+            ArtifactCachePath::default()
+                .artifact_path(package_ident)
+                .as_ref(),
+        )
         .env("HAB_LICENSE", "accept-no-persist")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -277,7 +280,7 @@ pub(crate) fn native_package_build(
         .unwrap();
 
     let mut cmd;
-    let mut exit_status;
+    let exit_status;
     if let Some(PlanContextConfig {
         docker_image: Some(docker_image),
         ..
@@ -351,7 +354,10 @@ pub(crate) fn native_package_build(
             .arg("-e")
             .arg("HAB_OUTPUT_PATH=/output")
             .arg("-e")
-            .arg(format!("HAB_ORIGIN={}", build_step.plan_ctx.id.as_ref().origin))
+            .arg(format!(
+                "HAB_ORIGIN={}",
+                build_step.plan_ctx.id.as_ref().origin
+            ))
             .arg("-e")
             .arg(format!(
                 "BUILD_PKG_TARGET={}",
@@ -388,7 +394,10 @@ pub(crate) fn native_package_build(
             .arg(relative_plan_context)
             .env("HAB_FEAT_NATIVE_PACKAGE_SUPPORT", "1")
             .env("HAB_OUTPUT_PATH", tmp_dir.path())
-            .env("HAB_ORIGIN", build_step.plan_ctx.id.as_ref().origin.to_string())
+            .env(
+                "HAB_ORIGIN",
+                build_step.plan_ctx.id.as_ref().origin.to_string(),
+            )
             .env("BUILD_PKG_TARGET", PackageTarget::default().to_string())
             .cwd(build_step.repo_ctx.path.as_ref())
             .stdin(NullFile)
@@ -491,12 +500,15 @@ pub(crate) fn bootstrap_package_build(
     );
 
     install_artifact_offline(
-        &artifact_cache.latest_artifact(
-            &build_step
-                .studio_package
-                .unwrap()
-                .to_resolved_dep_ident(PackageTarget::default()),
-        ).unwrap().id,
+        &artifact_cache
+            .latest_artifact(
+                &build_step
+                    .studio_package
+                    .unwrap()
+                    .to_resolved_dep_ident(PackageTarget::default()),
+            )
+            .unwrap()
+            .id,
     )?;
 
     let exit_status = Exec::cmd("sudo")
@@ -559,7 +571,10 @@ pub(crate) fn bootstrap_package_build(
         .arg("-R")
         .arg(relative_plan_context)
         .env("HAB_ORIGIN_KEYS", origin_keys)
-        .env("HAB_ORIGIN", build_step.plan_ctx.id.as_ref().origin.to_string())
+        .env(
+            "HAB_ORIGIN",
+            build_step.plan_ctx.id.as_ref().origin.to_string(),
+        )
         .env("HAB_LICENSE", "accept-no-persist")
         .env("HAB_STUDIO_SUP", "false")
         .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
@@ -665,12 +680,15 @@ pub(crate) fn standard_package_build(
     );
 
     install_artifact_offline(
-        &artifact_cache.latest_artifact(
-            &build_step
-                .studio_package
-                .unwrap()
-                .to_resolved_dep_ident(PackageTarget::default()),
-        ).unwrap().id,
+        &artifact_cache
+            .latest_artifact(
+                &build_step
+                    .studio_package
+                    .unwrap()
+                    .to_resolved_dep_ident(PackageTarget::default()),
+            )
+            .unwrap()
+            .id,
     )?;
 
     let cmd = Exec::cmd("sudo")
@@ -731,7 +749,10 @@ pub(crate) fn standard_package_build(
         .arg("-R")
         .arg(relative_plan_context)
         .env("HAB_ORIGIN_KEYS", origin_keys)
-        .env("HAB_ORIGIN", build_step.plan_ctx.id.as_ref().origin.to_string())
+        .env(
+            "HAB_ORIGIN",
+            build_step.plan_ctx.id.as_ref().origin.to_string(),
+        )
         .env("HAB_LICENSE", "accept-no-persist")
         .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
         .env("HAB_STUDIO_SUP", "false")

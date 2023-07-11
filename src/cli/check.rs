@@ -6,13 +6,12 @@ use tracing::{error, info};
 
 use crate::{
     check::{LeveledArtifactCheckViolation, LeveledSourceCheckViolation, ViolationLevel},
+    cli::output::OutputFormat,
     core::{
-        AutoBuildConfig, AutoBuildContext, BuildPlan, PackageDepGlob,
-        PackageTarget, PlanCheckStatus,
+        AutoBuildConfig, AutoBuildContext, BuildPlan, PackageDepGlob, PackageTarget,
+        PlanCheckStatus,
     },
 };
-
-use super::OutputFormat;
 
 #[derive(Debug, Args)]
 pub(crate) struct Params {

@@ -1,12 +1,11 @@
 use color_eyre::eyre::{eyre, Context, Result};
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Display,
     path::{Path, PathBuf},
 };
 
-use super::{AutoBuildContextPath, PlanContextPath, GlobSetExpression};
+use super::{AutoBuildContextPath, GlobSetExpression, PlanContextPath};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RepoConfig {

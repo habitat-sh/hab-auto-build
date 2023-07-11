@@ -10,8 +10,6 @@ mod output;
 mod remove;
 mod server;
 
-pub use output::*;
-
 use clap::{command, Parser, Subcommand};
 use color_eyre::eyre::Result;
 

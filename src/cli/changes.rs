@@ -6,12 +6,13 @@ use color_eyre::eyre::{eyre, Context, Result};
 use owo_colors::OwoColorize;
 use tracing::{error, info};
 
-use crate::core::{
-    AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, DependencyChangeCause, PackageDepGlob,
-    PackageTarget, RepoChanges,
+use crate::{
+    cli::output::OutputFormat,
+    core::{
+        AutoBuildConfig, AutoBuildContext, BuildOrder, ChangeDetectionMode, DependencyChangeCause,
+        PackageDepGlob, PackageTarget, RepoChanges,
+    },
 };
-
-use super::OutputFormat;
 
 #[derive(Debug, Args)]
 pub(crate) struct Params {
@@ -21,6 +22,9 @@ pub(crate) struct Params {
     /// Output format
     #[arg(value_enum, short = 'f', long, default_value_t = OutputFormat::Plain)]
     format: OutputFormat,
+    /// Build ordering to use with respect to the build's studio
+    #[arg(value_enum, short = 'b', long, default_value_t = BuildOrder::Strict)]
+    build_order: BuildOrder,
     /// Method to use to detect changes to packages
     #[arg(value_enum, short = 'm', long, default_value_t = ChangeDetectionMode::Disk)]
     change_detection_mode: ChangeDetectionMode,
@@ -57,6 +61,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     let changes = run_context.changes(
         &package_indices,
         args.change_detection_mode,
+        args.build_order,
         PackageTarget::default(),
     );
 

@@ -1,9 +1,9 @@
 use crate::core::{BOOTSTRAP_BUILD_STUDIO_PACKAGE, STANDARD_BUILD_STUDIO_PACKAGE};
 
 use super::{
-    ArtifactCache, BuildStudioConfig, PackageBuildIdent, PackageBuildVersion,
-    PackageDepGlobMatcher, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
-    PackageRelease, PackageResolvedDepIdent, PackageTarget, PackageVersion, PlanContext,
+    BuildStudioConfig, PackageBuildIdent, PackageBuildVersion, PackageDepGlobMatcher,
+    PackageDepIdent, PackageIdent, PackageName, PackageOrigin, PackageRelease,
+    PackageResolvedDepIdent, PackageTarget, PackageVersion, PlanContext,
     PlanContextFileChangeOnDisk, PlanContextFileChangeOnGit, PlanContextID,
     PlanContextLatestArtifact, PlanFilePath, RepoContextID,
 };
@@ -218,6 +218,12 @@ pub(crate) struct DepGraph {
 pub(crate) enum ChangeDetectionMode {
     Git,
     Disk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum BuildOrder {
+    Strict,
+    Relaxed,
 }
 
 impl DepGraph {
@@ -568,10 +574,11 @@ impl DepGraph {
         &self,
         node_indices: impl IntoIterator<Item = &'a NodeIndex>,
         change_detection_mode: ChangeDetectionMode,
+        build_order: BuildOrder,
         build_target: PackageTarget,
     ) -> HashMap<NodeIndex, Vec<DependencyChangeCause>> {
         let node_indices = node_indices.into_iter().collect::<Vec<_>>();
-        let changes = self.detect_changes(change_detection_mode, build_target);
+        let changes = self.detect_changes(change_detection_mode, build_order, build_target);
         changes
             .node_references()
             .filter(|(key, _)| node_indices.contains(&key))
@@ -582,9 +589,10 @@ impl DepGraph {
     pub fn detect_changes_in_repos(
         &self,
         change_detection_mode: ChangeDetectionMode,
+        build_order: BuildOrder,
         build_target: PackageTarget,
     ) -> BTreeMap<RepoContextID, HashMap<NodeIndex, Vec<DependencyChangeCause>>> {
-        let changed_deps = self.detect_changes(change_detection_mode, build_target);
+        let changed_deps = self.detect_changes(change_detection_mode, build_order, build_target);
         let mut changed_deps_by_repo: BTreeMap<
             RepoContextID,
             HashMap<NodeIndex, Vec<DependencyChangeCause>>,
@@ -607,6 +615,7 @@ impl DepGraph {
     pub fn detect_changes(
         &self,
         change_detection_mode: ChangeDetectionMode,
+        build_order: BuildOrder,
         build_target: PackageTarget,
     ) -> StableGraph<Vec<DependencyChangeCause>, DependencyType> {
         let dep_types = [
@@ -616,114 +625,105 @@ impl DepGraph {
         ]
         .into_iter()
         .collect::<HashSet<_>>();
-        let mut changed_deps: HashMap<NodeIndex, Vec<DependencyChangeCause>> = HashMap::new();
+        let mut changed_dep_causes: HashMap<NodeIndex, Vec<DependencyChangeCause>> = HashMap::new();
         for node_index in self.build_graph.node_indices() {
-            let dep = &self.build_graph[node_index];
-            if let Dependency::LocalPlan(plan_ctx) = dep {
-                let _repo_id = plan_ctx.repo_id.clone();
+            let node = &self.build_graph[node_index];
+            if let Dependency::LocalPlan(plan_ctx) = node {
                 let mut causes = Vec::new();
-                let node = &self.build_graph[node_index];
-                match node {
-                    Dependency::LocalPlan(PlanContext {
-                        id,
-                        latest_artifact,
-                        files_changed_on_disk,
-                        files_changed_on_git,
-                        ..
-                    }) => {
-                        if id.as_ref().target != build_target {
-                            continue;
-                        }
-                        if let Some(latest_artifact) = latest_artifact {
-                            match change_detection_mode {
-                                ChangeDetectionMode::Git => {
-                                    if !files_changed_on_git.is_empty() {
-                                        causes.push(DependencyChangeCause::PlanContextChanged {
-                                            latest_plan_artifact: latest_artifact.clone(),
-                                            files_changed_on_disk: Vec::new(),
-                                            files_changed_on_git: files_changed_on_git.clone(),
-                                        });
-                                    }
-                                }
-                                ChangeDetectionMode::Disk => {
-                                    if !files_changed_on_disk.is_empty() {
-                                        causes.push(DependencyChangeCause::PlanContextChanged {
-                                            latest_plan_artifact: latest_artifact.clone(),
-                                            files_changed_on_disk: files_changed_on_disk.clone(),
-                                            files_changed_on_git: Vec::new(),
-                                        });
-                                    }
-                                }
-                            }
-
-                            let mut updated_dep_artifacts = Vec::new();
-                            for dep_node_index in self
-                                .build_graph
-                                .edges_directed(node_index, Direction::Outgoing)
-                                .map(|e| e.target())
-                            {
-                                let dep_node = &self.build_graph[dep_node_index];
-                                match dep_node {
-                                    Dependency::ResolvedDep(dep) => {
-                                        warn!(target: "user-log",
-                                            "Not checking for updates to remote dependency: {}",
-                                            dep
-                                        );
-                                    }
-                                    Dependency::RemoteDep(dep) => {
-                                        // TODO: Check whether the remote dependency was updated ?
-                                        warn!(target: "user-log",
-                                            "Not checking for updates to remote dependency: {}",
-                                            dep
-                                        );
-                                    }
-                                    Dependency::LocalPlan(dep_plan_ctx) => {
-                                        if let Some(latest_dep_artifact) =
-                                            dep_plan_ctx.latest_artifact.as_ref()
-                                        {
-                                            if latest_dep_artifact.created_at
-                                                > latest_artifact.created_at
-                                            {
-                                                updated_dep_artifacts
-                                                    .push(latest_dep_artifact.clone());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if !updated_dep_artifacts.is_empty() {
-                                causes.push(DependencyChangeCause::DependencyArtifactsUpdated {
+                let PlanContext {
+                    id,
+                    latest_artifact,
+                    files_changed_on_disk,
+                    files_changed_on_git,
+                    ..
+                } = plan_ctx;
+                if id.as_ref().target != build_target {
+                    continue;
+                }
+                if let Some(latest_artifact) = latest_artifact {
+                    match change_detection_mode {
+                        ChangeDetectionMode::Git => {
+                            if !files_changed_on_git.is_empty() {
+                                causes.push(DependencyChangeCause::PlanContextChanged {
                                     latest_plan_artifact: latest_artifact.clone(),
-                                    updated_dep_artifacts,
+                                    files_changed_on_disk: Vec::new(),
+                                    files_changed_on_git: files_changed_on_git.clone(),
                                 });
                             }
-                        } else {
-                            causes.push(DependencyChangeCause::NoBuiltArtifact);
+                        }
+                        ChangeDetectionMode::Disk => {
+                            if !files_changed_on_disk.is_empty() {
+                                causes.push(DependencyChangeCause::PlanContextChanged {
+                                    latest_plan_artifact: latest_artifact.clone(),
+                                    files_changed_on_disk: files_changed_on_disk.clone(),
+                                    files_changed_on_git: Vec::new(),
+                                });
+                            }
                         }
                     }
-                    Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
+
+                    let mut updated_dep_artifacts = Vec::new();
+                    for dep_node_index in self
+                        .build_graph
+                        .edges_directed(node_index, Direction::Outgoing)
+                        .map(|e| e.target())
+                    {
+                        let dep_node = &self.build_graph[dep_node_index];
+                        match dep_node {
+                            Dependency::ResolvedDep(dep) => {
+                                warn!(target: "user-log",
+                                    "Not checking for updates to remote dependency: {}",
+                                    dep
+                                );
+                            }
+                            Dependency::RemoteDep(dep) => {
+                                // TODO: Check whether the remote dependency was updated ?
+                                warn!(target: "user-log",
+                                    "Not checking for updates to remote dependency: {}",
+                                    dep
+                                );
+                            }
+                            Dependency::LocalPlan(dep_plan_ctx) => {
+                                if let Some(latest_dep_artifact) =
+                                    dep_plan_ctx.latest_artifact.as_ref()
+                                {
+                                    if latest_dep_artifact.created_at > latest_artifact.created_at {
+                                        updated_dep_artifacts.push(latest_dep_artifact.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !updated_dep_artifacts.is_empty() {
+                        causes.push(DependencyChangeCause::DependencyArtifactsUpdated {
+                            latest_plan_artifact: latest_artifact.clone(),
+                            updated_dep_artifacts,
+                        });
+                    }
+                } else {
+                    causes.push(DependencyChangeCause::NoBuiltArtifact);
                 }
                 if !causes.is_empty() {
-                    changed_deps.entry(node_index).or_insert(causes);
+                    changed_dep_causes.entry(node_index).or_insert(causes);
                 }
             }
         }
         // Get build_rdeps of changed dependencies
-        let mut node_all_deps = HashSet::new();
-        let mut node_indices = changed_deps.keys().cloned().collect::<Vec<_>>();
-        while !node_indices.is_empty() {
-            let node_index = node_indices.pop().unwrap();
-            node_all_deps.insert(node_index);
+        let mut affected_node_indices = HashSet::new();
+        let mut changed_node_indices = changed_dep_causes.keys().cloned().collect::<Vec<_>>();
+        while !changed_node_indices.is_empty() {
+            let changed_node_index = changed_node_indices.pop().unwrap();
+            affected_node_indices.insert(changed_node_index);
             for (rev_dep_node_index, rev_dep_node_type) in self
                 .build_graph
-                .edges_directed(node_index, Direction::Incoming)
+                .edges_directed(changed_node_index, Direction::Incoming)
                 .filter(|e| dep_types.contains(e.weight()))
                 .map(|e| (e.source(), e.weight()))
             {
-                if !node_all_deps.contains(&rev_dep_node_index) {
-                    node_indices.push(rev_dep_node_index);
+                if !affected_node_indices.contains(&rev_dep_node_index) {
+                    changed_node_indices.push(rev_dep_node_index);
                 }
-                let rev_dep_causes = changed_deps.entry(rev_dep_node_index).or_default();
+                let rev_dep_causes = changed_dep_causes.entry(rev_dep_node_index).or_default();
                 if let DependencyType::Studio = rev_dep_node_type {
                     if rev_dep_causes
                         .iter_mut()
@@ -732,7 +732,7 @@ impl DepGraph {
                         })
                         .is_none()
                     {
-                        let plan_ctx = self.build_graph[node_index].plan_ctx().unwrap();
+                        let plan_ctx = self.build_graph[changed_node_index].plan_ctx().unwrap();
                         rev_dep_causes.push(DependencyChangeCause::DependencyStudioNeedRebuild {
                             plan: plan_ctx.id.clone(),
                         })
@@ -743,14 +743,14 @@ impl DepGraph {
                             matches!(c, DependencyChangeCause::DependencyPlansNeedRebuild { .. })
                         })
                     {
-                        let plan_ctx = self.build_graph[node_index].plan_ctx().unwrap();
+                        let plan_ctx = self.build_graph[changed_node_index].plan_ctx().unwrap();
                         plans.insert((
                             *rev_dep_node_type,
                             plan_ctx.id.clone(),
                             plan_ctx.plan_path.to_owned(),
                         ));
                     } else {
-                        let plan_ctx = self.build_graph[node_index].plan_ctx().unwrap();
+                        let plan_ctx = self.build_graph[changed_node_index].plan_ctx().unwrap();
                         rev_dep_causes.push(DependencyChangeCause::DependencyPlansNeedRebuild {
                             plans: vec![(
                                 *rev_dep_node_type,
@@ -766,8 +766,23 @@ impl DepGraph {
         }
         self.build_graph.filter_map(
             |node_index, _node| {
-                if let Some(causes) = changed_deps.remove(&node_index) {
-                    Some(causes)
+                if let Some(causes) = changed_dep_causes.remove(&node_index) {
+                    match build_order {
+                        BuildOrder::Strict => Some(causes),
+                        BuildOrder::Relaxed => {
+                            // If a studio update is the only reason for a rebuild it is not necessary
+                            if causes.len() == 1
+                                && matches!(
+                                    causes[0],
+                                    DependencyChangeCause::DependencyStudioNeedRebuild { .. }
+                                )
+                            {
+                                None
+                            } else {
+                                Some(causes)
+                            }
+                        }
+                    }
                 } else {
                     None
                 }

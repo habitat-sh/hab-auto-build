@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     check::{
-        PlanContextConfig, LeveledSourceCheckViolation, SourceCheck, SourceCheckViolation,
+        LeveledSourceCheckViolation, PlanContextConfig, SourceCheck, SourceCheckViolation,
         SourceRuleOptions, ViolationLevel,
     },
-    core::{ArtifactContext, Blake3, PackageSha256Sum, PlanContext, SourceContext},
+    core::{ArtifactContext, PackageSha256Sum, PlanContext, SourceContext},
 };
 
 #[derive(Debug, Serialize, Deserialize)]

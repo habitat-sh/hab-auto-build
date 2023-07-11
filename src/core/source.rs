@@ -7,7 +7,7 @@ use std::{
 
 use askalono::{ScanMode, ScanStrategy, Store, TextData};
 use bzip2::read::BzDecoder;
-use color_eyre::eyre::{Context, Result};
+use color_eyre::eyre::Result;
 use flate2::bufread::GzDecoder;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use lazy_static::lazy_static;
@@ -16,7 +16,7 @@ use tar::Archive;
 use tracing::{error, trace};
 use xz2::bufread::XzDecoder;
 
-use super::{Blake3, FileKind, PackageSha256Sum};
+use super::{FileKind, PackageSha256Sum};
 
 const LICENSE_GLOBS: &[&str] = &[
     // General
@@ -102,7 +102,7 @@ impl SourceContext {
         let file_type = FileKind::detect_from_path(path.as_ref())?;
         let file = BufReader::new(File::open(path.as_ref())?);
         let format;
-        let mut licenses = BTreeSet::new();
+        let mut licenses;
         match file_type {
             FileKind::Tar => {
                 format = (file_type, None);

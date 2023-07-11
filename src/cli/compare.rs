@@ -1,17 +1,16 @@
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
-use chrono_humanize::{Accuracy, HumanTime};
 use clap::{arg, Args};
 use color_eyre::eyre::{eyre, Context, Result};
 use owo_colors::OwoColorize;
-use tracing::{error, info};
+use tracing::info;
 
-use crate::core::{
-    AutoBuildConfig, AutoBuildContext, DependencyChangeCause, PackageDepGlob, PackageDiff,
-    PackageName, PackageOrigin, PackageTarget, RepoChanges,
+use crate::{
+    cli::output::OutputFormat,
+    core::{
+        AutoBuildConfig, AutoBuildContext, PackageDiff, PackageName, PackageOrigin, PackageTarget,
+    },
 };
-
-use super::OutputFormat;
 
 #[derive(Debug, Args)]
 pub(crate) struct Params {
@@ -50,7 +49,7 @@ fn output_plain(
     package_diffs: HashMap<(PackageTarget, PackageOrigin, PackageName), PackageDiff>,
 ) -> Result<()> {
     let mut print_header = true;
-    for ((target, origin, name), package_diff) in package_diffs.iter() {
+    for ((_, origin, name), package_diff) in package_diffs.iter() {
         if package_diff.source != package_diff.target {
             if print_header {
                 info!(target: "user-ui", "{}", "Updated Plans".white().bold());
@@ -60,7 +59,7 @@ fn output_plain(
         }
     }
     let mut print_header = true;
-    for ((target, origin, name), package_diff) in package_diffs.iter() {
+    for ((_, origin, name), package_diff) in package_diffs.iter() {
         if package_diff.source == package_diff.target {
             if print_header {
                 info!(target: "user-ui", "{}", "Unchanged Plans ".white().bold());

@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use color_eyre::{
     eyre::{eyre, Context, Result},
     Help, SectionExt,
@@ -570,7 +570,8 @@ impl ArtifactContext {
         };
         Ok(ArtifactContext {
             created_at: DateTime::<Utc>::from_utc(
-                NaiveDateTime::parse_from_str(id.release.to_string().as_str(), "%Y%m%d%H%M%S").expect("Invalid release value"),
+                NaiveDateTime::parse_from_str(id.release.to_string().as_str(), "%Y%m%d%H%M%S")
+                    .expect("Invalid release value"),
                 Utc,
             ),
             id,

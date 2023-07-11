@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeSet, HashSet},
-    fmt::Display,
-    path::PathBuf,
-};
+use std::{collections::HashSet, fmt::Display, path::PathBuf};
 
 use owo_colors::OwoColorize;
 use path_absolutize::Absolutize;
@@ -11,8 +7,8 @@ use tracing::{debug, error};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, PlanContextConfig,
-        LeveledArtifactCheckViolation, ViolationLevel,
+        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext,
+        LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackageIdent, PackagePath},
 };
@@ -507,7 +503,6 @@ impl ArtifactCheck for ScriptCheck {
                     // TODO: Handle case where command is symlinked
                     if let Some(command) = metadata.interpreter.args.first() {
                         let mut found = false;
-                        let mut is_executable = false;
                         for runtime_artifact_ctx in
                             checker_context.runtime_artifacts.as_ref().unwrap().iter()
                         {

@@ -1,8 +1,8 @@
-use crate::core::{AutoBuildConfig, AutoBuildContext, DepGraphData, DependencyType};
+use crate::core::{AutoBuildConfig, AutoBuildContext, DepGraphData};
 
 use axum::{
     body::{boxed, Full},
-    extract::{Query, State},
+    extract::State,
     handler::HandlerWithoutStateExt,
     http::{header, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
@@ -11,15 +11,10 @@ use axum::{
 };
 use clap::Args;
 use color_eyre::eyre::{eyre, Context, Result};
-use petgraph::{
-    algo::{self, greedy_feedback_arc_set},
-    stable_graph::EdgeIndex,
-    visit::EdgeRef,
-};
+use petgraph::visit::EdgeRef;
 use rust_embed::RustEmbed;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, env};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Args)]
 pub(crate) struct Params {

@@ -10,7 +10,6 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    time::Duration,
 };
 use suppaftp::FtpStream;
 use tracing::{debug, log::error};
@@ -217,8 +216,9 @@ impl Download {
                                         .parse()
                                         .unwrap(),
                                 );
-                                let mut file_range_res = Download::execute_request(&client, request)
-                                    .expect("Failed to send request to download file");
+                                let mut file_range_res =
+                                    Download::execute_request(&client, request)
+                                        .expect("Failed to send request to download file");
                                 for _ in 0..buffer_chunks {
                                     let mut buffer = vec![0u8; *DOWNLOAD_MEMORY_BUFFER as usize];
                                     let range = file_range_res.by_ref();
@@ -248,7 +248,7 @@ impl Download {
             }
             None => {
                 debug!("Starting single-threaded download of file from {}", url);
-                let mut request = reqwest::blocking::Request::new(Method::GET, url);
+                let request = reqwest::blocking::Request::new(Method::GET, url);
                 let response = Download::execute_request(&client, request)?;
                 let mut file = File::create(self.filename)?;
                 file.write_all(&response.bytes()?)?;

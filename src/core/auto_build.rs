@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Display,
     fs::File,
-    io::Read,
     path::{Path, PathBuf},
     sync::{mpsc::channel, Arc, RwLock},
     time::Instant,
@@ -20,7 +19,7 @@ use diesel::{
 
 use ignore::WalkBuilder;
 use lazy_static::lazy_static;
-use petgraph::{algo, stable_graph::NodeIndex, visit::IntoNodeReferences};
+use petgraph::{algo, stable_graph::NodeIndex};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, trace};
@@ -39,9 +38,9 @@ use crate::{
 
 use super::{
     habitat::{self, BuildError},
-    ChangeDetectionMode, DepGraph, DepGraphData, DependencyChangeCause, PackageBuildVersion,
-    PackageDepGlob, PackageDepIdent, PackageIdent, PackageName, PackageOrigin, PackageSha256Sum,
-    PackageSource, PackageTarget, PackageVersion, PlanContext, PlanContextID,
+    BuildOrder, ChangeDetectionMode, DepGraph, DepGraphData, DependencyChangeCause,
+    PackageBuildVersion, PackageDepGlob, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
+    PackageSha256Sum, PackageSource, PackageTarget, PlanContext, PlanContextID,
     PlanContextPathGitSyncStatus, PlanScannerBuilder, RepoConfig, RepoContext, RepoContextID,
 };
 
@@ -803,10 +802,11 @@ impl AutoBuildContext {
         &self,
         package_indices: &[NodeIndex],
         change_detection_mode: ChangeDetectionMode,
+        build_order: BuildOrder,
         build_target: PackageTarget,
     ) -> Vec<RepoChanges<'_>> {
         self.dep_graph
-            .detect_changes_in_repos(change_detection_mode, build_target)
+            .detect_changes_in_repos(change_detection_mode, build_order, build_target)
             .into_iter()
             .map(|(repo_ctx_id, changes)| RepoChanges {
                 repo: self.repos.get(&repo_ctx_id).unwrap(),
@@ -851,6 +851,7 @@ impl AutoBuildContext {
         let plan_node_changes = self.dep_graph.detect_changes_in_deps(
             plan_node_indices,
             ChangeDetectionMode::Disk,
+            BuildOrder::Strict,
             build_target,
         );
         let artifact_cache = self.artifact_cache.read().unwrap();
@@ -903,6 +904,7 @@ impl AutoBuildContext {
                         let plan_node_changes = self.dep_graph.detect_changes_in_deps(
                             &[*plan_node_index],
                             ChangeDetectionMode::Disk,
+                            BuildOrder::Strict,
                             build_target,
                         );
                         let causes = plan_node_changes.get(&plan_node_index);
@@ -919,7 +921,6 @@ impl AutoBuildContext {
         connection: &mut SqliteConnection,
         plan_node_indices: &[NodeIndex],
         is_dry_run: bool,
-        build_target: PackageTarget,
     ) -> Result<BTreeMap<RepoContextID, Vec<PlanContextGitSyncStatus>>, GitSyncError> {
         let mut results: BTreeMap<RepoContextID, Vec<PlanContextGitSyncStatus>> = BTreeMap::new();
         for plan_node_index in plan_node_indices {
@@ -958,6 +959,7 @@ impl AutoBuildContext {
         let plan_node_changes = self.dep_graph.detect_changes_in_deps(
             plan_node_indices,
             ChangeDetectionMode::Disk,
+            BuildOrder::Strict,
             build_target,
         );
         let artifact_cache = self.artifact_cache.read().unwrap();
@@ -970,9 +972,9 @@ impl AutoBuildContext {
                         let mut blocking_causes = Vec::new();
                         for cause in causes {
                             match cause {
-                                DependencyChangeCause::PlanContextChanged { .. }
-                                | DependencyChangeCause::DependencyStudioNeedRebuild { .. } => {}
+                                DependencyChangeCause::PlanContextChanged { .. } => {}
                                 DependencyChangeCause::DependencyArtifactsUpdated { .. }
+                                | DependencyChangeCause::DependencyStudioNeedRebuild { .. }
                                 | DependencyChangeCause::DependencyPlansNeedRebuild { .. }
                                 | DependencyChangeCause::NoBuiltArtifact => {
                                     blocking_causes.push(cause.clone())
@@ -1023,6 +1025,7 @@ impl AutoBuildContext {
                         let plan_node_changes = self.dep_graph.detect_changes_in_deps(
                             &[*plan_node_index],
                             ChangeDetectionMode::Disk,
+                            BuildOrder::Strict,
                             build_target,
                         );
                         let causes = plan_node_changes.get(&plan_node_index);
@@ -1038,12 +1041,13 @@ impl AutoBuildContext {
         &self,
         package_indices: Vec<NodeIndex>,
         change_detection_mode: ChangeDetectionMode,
+        build_order: BuildOrder,
         build_target: PackageTarget,
         allow_remote: bool,
     ) -> Result<BuildPlan> {
-        let base_changes_graph = self
-            .dep_graph
-            .detect_changes(change_detection_mode, build_target);
+        let base_changes_graph =
+            self.dep_graph
+                .detect_changes(change_detection_mode, build_order, build_target);
 
         let mut changes_graph = base_changes_graph.filter_map(
             |_node_index, node| Some(node),

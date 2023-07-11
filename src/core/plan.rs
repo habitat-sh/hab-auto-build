@@ -1,18 +1,18 @@
 use std::{
     collections::HashMap,
-    fmt::{Display, Write as FmtWrite},
+    fmt::Display,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::Sender,
 };
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use color_eyre::{
     eyre::{eyre, Context, Result},
     Help, SectionExt,
 };
-use diesel::{sql_types::Date, SqliteConnection};
+use diesel::SqliteConnection;
 use ignore::{ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 
 use lazy_static::lazy_static;
@@ -406,7 +406,7 @@ impl PlanContext {
                                     real_last_modified_at
                                 };
                             let git_modified_at: Option<DateTime<Utc>> = {
-                                let mut child = std::process::Command::new("git")
+                                let child = std::process::Command::new("git")
                                     .arg("log")
                                     .arg("-1")
                                     .arg("--pretty=%ci")
@@ -488,7 +488,7 @@ impl PlanContext {
                     };
                     if !is_locally_modified {
                         let git_modified_at: Option<DateTime<Utc>> = {
-                            let mut child = std::process::Command::new("git")
+                            let child = std::process::Command::new("git")
                                 .arg("log")
                                 .arg("-1")
                                 .arg("--pretty=%ci")
@@ -510,7 +510,8 @@ impl PlanContext {
                                     entry.path().set_last_modifed_at(git_modified_at)?;
                                 }
                                 results.push(PlanContextPathGitSyncStatus::Synced(
-                                    Path::new(".").join(entry.path().strip_prefix(&self.context_path)?),
+                                    Path::new(".")
+                                        .join(entry.path().strip_prefix(&self.context_path)?),
                                     disk_modified_at,
                                     git_modified_at,
                                 ));

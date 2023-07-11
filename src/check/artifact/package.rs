@@ -10,12 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, PlanContextConfig,
-        LeveledArtifactCheckViolation, ViolationLevel,
+        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext,
+        LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
-    core::{
-        ArtifactCache, ArtifactContext, PackageDepGlob, PackageDepIdent, PackageIdent, PackagePath,
-    },
+    core::{ArtifactCache, ArtifactContext, PackageDepGlob, PackageIdent, PackagePath},
 };
 
 #[derive(Debug, Serialize, Deserialize)]

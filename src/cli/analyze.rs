@@ -7,12 +7,13 @@ use tracing::{error, info};
 
 use clap::Args;
 
-use crate::core::{
-    AnalysisType, AutoBuildConfig, AutoBuildContext, Dependency, DependencyAnalysis,
-    PackageDepGlob, PackageTarget,
+use crate::{
+    cli::output::OutputFormat,
+    core::{
+        AnalysisType, AutoBuildConfig, AutoBuildContext, Dependency, DependencyAnalysis,
+        PackageDepGlob, PackageTarget,
+    },
 };
-
-use super::OutputFormat;
 
 #[derive(Debug, Args)]
 pub(crate) struct Params {

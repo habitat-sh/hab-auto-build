@@ -8,14 +8,16 @@ use tracing::{error, info};
 
 use crate::{
     check::ViolationLevel,
-    cli::check::output_violations,
+    cli::{
+        check::{self, output_violations},
+        output::OutputFormat,
+    },
     core::{
-        habitat::BuildError, AutoBuildConfig, AutoBuildContext, BuildPlan, BuildStep,
-        BuildStepError, Dependency, DownloadStatus, PackageDepGlob, PackageTarget, PlanCheckStatus, ChangeDetectionMode,
+        habitat::BuildError, AutoBuildConfig, AutoBuildContext, BuildOrder, BuildPlan, BuildStep,
+        BuildStepError, ChangeDetectionMode, Dependency, DownloadStatus, PackageDepGlob,
+        PackageTarget, PlanCheckStatus,
     },
 };
-
-use super::{check, OutputFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum CheckLevel {
@@ -35,6 +37,9 @@ pub(crate) struct Params {
     /// Do a dry run of the build, does not actually build anything
     #[arg(short = 'd', long)]
     dry_run: bool,
+    /// Build ordering to use with respect to the build's studio
+    #[arg(value_enum, short = 'b', long, default_value_t = BuildOrder::Strict)]
+    build_order: BuildOrder,
     /// Method to use to detect changes to packages
     #[arg(value_enum, short = 'm', long, default_value_t = ChangeDetectionMode::Disk)]
     change_detection_mode: ChangeDetectionMode,
@@ -67,7 +72,13 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         );
         return Ok(());
     }
-    let build_plan = run_context.build_plan_generate(package_indices, args.change_detection_mode, PackageTarget::default(), args.allow_remote)?;
+    let build_plan = run_context.build_plan_generate(
+        package_indices,
+        args.change_detection_mode,
+        args.build_order,
+        PackageTarget::default(),
+        args.allow_remote,
+    )?;
     if args.dry_run {
         match args.format {
             OutputFormat::Plain => output_plain(build_plan)?,
@@ -254,9 +265,9 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                     }
                 }
                 Err(BuildStepError::Build(
-                    BuildError::Native(plan_ctx_id, build_log)
-                    | BuildError::Bootstrap(plan_ctx_id, build_log)
-                    | BuildError::Standard(plan_ctx_id, build_log),
+                    BuildError::Native(_, build_log)
+                    | BuildError::Bootstrap(_, build_log)
+                    | BuildError::Standard(_, build_log),
                 )) => {
                     info!(target: "user-ui", "{} [{}] {}", "Build Failure".red().bold(), step.studio, step.plan_ctx.id);
                     info!(target: "user-ui", "{}: Failed to complete build of package {}, you should fix the plan at {} before re-attempting the build. You can find the build log at {}", "error".bold().red(), step.plan_ctx.id.yellow(), step.plan_ctx.plan_path.as_ref().display().blue(), build_log.display().blue());
