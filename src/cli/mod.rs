@@ -1,8 +1,8 @@
 mod add;
 mod analyze;
 mod build;
-mod check;
 mod changes;
+mod check;
 mod compare;
 mod download;
 mod git_sync;
@@ -42,7 +42,7 @@ enum Commands {
     /// Sync plan file timestamps with git commit timestamps
     GitSync(git_sync::Params),
     /// Start a server to visualize the package build graph
-    Server(server::Params)
+    Server(server::Params),
 }
 
 impl Cli {

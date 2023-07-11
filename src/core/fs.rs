@@ -1,5 +1,5 @@
-use chrono::{DateTime, Utc, NaiveDateTime};
-use color_eyre::eyre::{Context, Result, eyre};
+use chrono::{DateTime, NaiveDateTime, Utc};
+use color_eyre::eyre::{eyre, Context, Result};
 use globset::{Glob, GlobSetBuilder};
 use infer::Infer;
 use lazy_static::lazy_static;
@@ -245,7 +245,8 @@ where
             NaiveDateTime::from_timestamp_opt(
                 modified_at.unix_seconds(),
                 modified_at.nanoseconds(),
-            ).ok_or(eyre!("Last modification timestamp out of range"))?,
+            )
+            .ok_or(eyre!("Last modification timestamp out of range"))?,
             Utc,
         ))
     }

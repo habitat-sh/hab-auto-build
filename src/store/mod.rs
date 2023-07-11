@@ -11,7 +11,7 @@ use crate::{
         ArtifactContext, Blake3, PackageBuildIdent, PackageSha256Sum, PackageSource,
         PlanContextPath, SourceContext,
     },
-    store::{model::SourceContextRecord},
+    store::model::SourceContextRecord,
 };
 
 use self::model::{ArtifactContextRecord, BuildTimeRecord, FileModificationRecord};

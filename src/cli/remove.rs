@@ -4,11 +4,9 @@ use clap::Args;
 use tracing::{error, info};
 
 use crate::core::{
-    AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageDepIdent,
-    PackageTarget, RemoveStatus,
+    AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageDepIdent, PackageTarget, RemoveStatus,
 };
 use color_eyre::eyre::{eyre, Context, Result};
-
 
 #[derive(Debug, Args)]
 pub(crate) struct Params {

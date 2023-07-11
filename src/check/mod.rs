@@ -6,7 +6,9 @@ use std::{
     fmt::Display,
 };
 
-use crate::core::{ArtifactCache, ArtifactContext, PackageIdent, PlanContext, SourceContext};
+use crate::core::{
+    ArtifactCache, ArtifactContext, PackageIdent, PackageTarget, PlanContext, SourceContext,
+};
 
 use color_eyre::{
     eyre::{eyre, Result},
@@ -53,7 +55,7 @@ pub(crate) enum RuleConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct PlanContextConfig {
-    #[serde(default, rename="docker-image")]
+    #[serde(default, rename = "docker-image")]
     pub docker_image: Option<String>,
     #[serde(default)]
     pub source_rules: Vec<SourceRule>,
@@ -67,47 +69,56 @@ impl PlanContextConfig {
         self.artifact_rules.extend_from_slice(&other.artifact_rules);
         self
     }
-    pub fn from_str(value: &str) -> Result<PlanContextConfig> {
+    pub fn from_str(value: &str, target: PackageTarget) -> Result<PlanContextConfig> {
         let document = value.parse::<Document>()?;
         let mut restructured_document = Document::new();
         let mut restructured_rules = Array::default();
-        if let Some(rules) = document.get("rules") {
-            let rules = rules
-                .as_table()
-                .ok_or(eyre!("Invalid plan configuration, 'rules' must be a table"))?;
-            for (rule_id, rule_config) in rules.iter() {
-                if let Some(level) = rule_config.as_str() {
-                    let mut rule = InlineTable::default();
-                    rule.insert(
-                        "id",
-                        Value::String(Formatted::<String>::new(rule_id.to_string())),
-                    );
-                    let mut rule_options = InlineTable::default();
-                    rule_options.insert(
-                        "level",
-                        Value::String(Formatted::<String>::new(level.to_string())),
-                    );
-                    rule.insert("options", Value::InlineTable(rule_options));
-                    restructured_rules.push(Value::InlineTable(rule));
-                } else if rule_config.is_inline_table() {
-                    let mut rule = InlineTable::default();
-                    rule.insert(
-                        "id",
-                        Value::String(Formatted::<String>::new(rule_id.to_string())),
-                    );
-                    rule.insert(
-                        "options",
-                        Value::InlineTable(rule_config.as_inline_table().unwrap().clone()),
-                    );
-                    restructured_rules.push(Value::InlineTable(rule));
-                } else {
-                    return Err(eyre!(
-                        "Invalid rule configuration for '{}'",
-                        rule_id.to_string()
-                    ));
+        let rule_sets = [
+            document.get("rules"),
+            document
+                .get(target.to_string().as_str())
+                .and_then(|v| v.get("rules")),
+        ];
+        for rule_set in rule_sets {
+            if let Some(rules) = rule_set {
+                let rules = rules
+                    .as_table()
+                    .ok_or(eyre!("Invalid plan configuration, 'rules' must be a table"))?;
+                for (rule_id, rule_config) in rules.iter() {
+                    if let Some(level) = rule_config.as_str() {
+                        let mut rule = InlineTable::default();
+                        rule.insert(
+                            "id",
+                            Value::String(Formatted::<String>::new(rule_id.to_string())),
+                        );
+                        let mut rule_options = InlineTable::default();
+                        rule_options.insert(
+                            "level",
+                            Value::String(Formatted::<String>::new(level.to_string())),
+                        );
+                        rule.insert("options", Value::InlineTable(rule_options));
+                        restructured_rules.push(Value::InlineTable(rule));
+                    } else if rule_config.is_inline_table() {
+                        let mut rule = InlineTable::default();
+                        rule.insert(
+                            "id",
+                            Value::String(Formatted::<String>::new(rule_id.to_string())),
+                        );
+                        rule.insert(
+                            "options",
+                            Value::InlineTable(rule_config.as_inline_table().unwrap().clone()),
+                        );
+                        restructured_rules.push(Value::InlineTable(rule));
+                    } else {
+                        return Err(eyre!(
+                            "Invalid rule configuration for '{}'",
+                            rule_id.to_string()
+                        ));
+                    }
                 }
             }
         }
+
         restructured_document.insert("rules", toml_edit::value(restructured_rules));
         let plan_config: PlanConfig = toml_edit::de::from_document(restructured_document.clone())
             .map_err(|err| eyre!("Invalid .hab-plan-config.toml file: {}", err))

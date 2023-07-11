@@ -7,12 +7,8 @@ use clap::Args;
 
 use crate::{
     cli::check::output_violations,
-    core::{
-        AutoBuildConfig, AutoBuildContext, DownloadStatus, PackageDepGlob, PackageTarget,
-    },
+    core::{AutoBuildConfig, AutoBuildContext, DownloadStatus, PackageDepGlob, PackageTarget},
 };
-
-
 
 #[derive(Debug, Args)]
 pub(crate) struct Params {

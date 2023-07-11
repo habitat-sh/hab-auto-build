@@ -1,5 +1,5 @@
 use askalono::Store;
-use color_eyre::eyre::{eyre, Result, Context};
+use color_eyre::eyre::{eyre, Context, Result};
 use flate2::bufread::GzDecoder;
 use serde_json::Value;
 use std::{
@@ -30,10 +30,7 @@ fn download_license_archive(
     Ok(())
 }
 
-fn read_license_archive(
-    license_archive: impl AsRef<Path>,
-    store: &mut Store,
-) -> Result<()> {
+fn read_license_archive(license_archive: impl AsRef<Path>, store: &mut Store) -> Result<()> {
     let license_archive = std::fs::File::open(license_archive.as_ref())?;
     let reader = BufReader::new(license_archive);
     let decoder = GzDecoder::new(reader);
@@ -62,9 +59,11 @@ fn read_license_archive(
                     entry_path.display()
                 )
             })?;
-            let is_deprecated = data["isDeprecatedLicenseId"].as_bool().expect("missing isDeprecatedLicenseId");
+            let is_deprecated = data["isDeprecatedLicenseId"]
+                .as_bool()
+                .expect("missing isDeprecatedLicenseId");
             if is_deprecated {
-                continue
+                continue;
             }
             let id = data["licenseId"]
                 .as_str()
@@ -103,7 +102,9 @@ fn main() -> Result<()> {
         let mut store = Store::new();
         read_license_archive(license_archive, &mut store)?;
         let mut cache = std::fs::File::create(license_cache)?;
-        store.to_cache(&mut cache).expect("Failed to serialize store");
+        store
+            .to_cache(&mut cache)
+            .expect("Failed to serialize store");
         cache.sync_all()?;
     }
 

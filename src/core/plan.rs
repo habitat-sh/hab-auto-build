@@ -275,7 +275,7 @@ impl PlanContext {
             {
                 let mut data = String::new();
                 file.read_to_string(&mut data)?;
-                match PlanContextConfig::from_str(data.as_str())
+                match PlanContextConfig::from_str(data.as_str(), target)
                     .with_section(move || {
                         data.header(format!("{}:", "File Contents".bright_cyan()))
                     })

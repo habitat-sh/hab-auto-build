@@ -5,7 +5,10 @@ use std::{
 };
 
 use chrono::Duration;
-use color_eyre::{eyre::{Result, eyre, Context}, Help};
+use color_eyre::{
+    eyre::{eyre, Context, Result},
+    Help,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

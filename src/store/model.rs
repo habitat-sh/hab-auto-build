@@ -1,5 +1,4 @@
-
-use diesel::{Queryable};
+use diesel::Queryable;
 
 #[derive(Debug, Queryable)]
 pub struct FileModificationRecord {
@@ -21,10 +20,8 @@ pub struct ArtifactContextRecord {
     pub context: String,
 }
 
-
 #[derive(Debug, Queryable)]
 pub struct SourceContextRecord {
     pub hash: String,
     pub context: String,
 }
-

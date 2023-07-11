@@ -1,7 +1,7 @@
+mod check;
 mod cli;
 mod core;
 mod store;
-mod check;
 
 use cli::Cli;
 use color_eyre::eyre::Result;

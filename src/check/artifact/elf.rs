@@ -7,8 +7,8 @@ use tracing::{debug, trace};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext, PlanContextConfig,
-        LeveledArtifactCheckViolation, ViolationLevel,
+        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext,
+        LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, ElfType, GlobSetExpression, PackageIdent, PackagePath},
 };
@@ -927,15 +927,12 @@ impl ArtifactCheck for ElfCheck {
                         }
                     }
                 }
-                if let Some(file_name) =
-                    interpreter_path.file_name().and_then(|x| x.to_str())
-                {
+                if let Some(file_name) = interpreter_path.file_name().and_then(|x| x.to_str()) {
                     interpreter_name = Some(file_name.to_string());
                     if let Some(interpreter_dep) =
                         interpreter_path.package_ident(artifact_context.target)
                     {
-                        if let Some(interpreter_artifact_ctx) =
-                            tdep_artifacts.get(&interpreter_dep)
+                        if let Some(interpreter_artifact_ctx) = tdep_artifacts.get(&interpreter_dep)
                         {
                             if interpreter_artifact_ctx
                                 .elfs
@@ -943,10 +940,7 @@ impl ArtifactCheck for ElfCheck {
                                 .is_none()
                             {
                                 let resolved_interpreter_path = interpreter_artifact_ctx
-                                    .resolve_path(
-                                        tdep_artifacts,
-                                        interpreter_path.as_path(),
-                                    );
+                                    .resolve_path(tdep_artifacts, interpreter_path.as_path());
                                 if resolved_interpreter_path != *interpreter_path {
                                     debug!(
                                         "In {}, following elf interpreter path: {} -> {}",
@@ -957,9 +951,7 @@ impl ArtifactCheck for ElfCheck {
                                     if resolved_interpreter_path
                                         .package_ident(interpreter_artifact_ctx.target)
                                         .and_then(|p| tdep_artifacts.get(&p))
-                                        .and_then(|a| {
-                                            a.elfs.get(&resolved_interpreter_path)
-                                        })
+                                        .and_then(|a| a.elfs.get(&resolved_interpreter_path))
                                         .is_none()
                                         && !elf_interpreter_not_found_options
                                             .ignored_files
@@ -971,10 +963,8 @@ impl ArtifactCheck for ElfCheck {
                                                 ElfRule::ELFInterpreterNotFound(
                                                     ELFInterpreterNotFound {
                                                         source: path.clone(),
-                                                        interpreter: interpreter_path
-                                                            .clone(),
-                                                        interpreter_dependency:
-                                                            interpreter_dep,
+                                                        interpreter: interpreter_path.clone(),
+                                                        interpreter_dependency: interpreter_dep,
                                                     },
                                                 ),
                                             ),
@@ -1025,12 +1015,12 @@ impl ArtifactCheck for ElfCheck {
                     {
                         violations.push(LeveledArtifactCheckViolation {
                             level: host_elf_interpreter_options.level,
-                            violation: ArtifactCheckViolation::Elf(
-                                ElfRule::HostELFInterpreter(HostELFInterpreter {
+                            violation: ArtifactCheckViolation::Elf(ElfRule::HostELFInterpreter(
+                                HostELFInterpreter {
                                     source: path.clone(),
                                     interpreter: interpreter_path.clone(),
-                                }),
-                            ),
+                                },
+                            )),
                         });
                     }
                 } else if !bad_elf_interpreter_options
