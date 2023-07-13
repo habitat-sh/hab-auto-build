@@ -11,6 +11,7 @@ use crate::{
         LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackageIdent, PackagePath},
+    store::Store,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -354,9 +355,10 @@ impl Default for ScriptCheck {
 impl ArtifactCheck for ScriptCheck {
     fn artifact_context_check(
         &self,
+        store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
-        _artifact_cache: &ArtifactCache,
+        _artifact_cache: &mut ArtifactCache,
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
         let mut violations = vec![];

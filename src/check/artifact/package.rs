@@ -14,6 +14,7 @@ use crate::{
         LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, PackageDepGlob, PackageIdent, PackagePath},
+    store::Store,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -334,9 +335,10 @@ pub(crate) struct PackageBeforeCheck {}
 impl ArtifactCheck for PackageBeforeCheck {
     fn artifact_context_check(
         &self,
+        store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
-        artifact_cache: &ArtifactCache,
+        artifact_cache: &mut ArtifactCache,
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
         let mut violations = vec![];
@@ -495,7 +497,7 @@ impl ArtifactCheck for PackageBeforeCheck {
             .tdeps
             .iter()
             .filter_map(|dep_ident| {
-                if let Some(artifact) = artifact_cache.artifact(dep_ident) {
+                if let Some(artifact) = artifact_cache.artifact(dep_ident).unwrap() {
                     Some((artifact.id.clone(), artifact.clone()))
                 } else {
                     violations.push(LeveledArtifactCheckViolation {
@@ -520,7 +522,7 @@ impl ArtifactCheck for PackageBeforeCheck {
             .filter_map(|search_path| {
                 if let Some(dep_ident) = search_path.package_ident(artifact_context.target) {
                     if tdep_artifacts.get(&dep_ident).is_some() {
-                        let artifact_ctx = artifact_cache.artifact(&dep_ident).cloned();
+                        let artifact_ctx = artifact_cache.artifact(&dep_ident).unwrap();
                         if let Some(artifact_ctx) = &artifact_ctx {
                             for (elf_path, elf_metadata) in &artifact_ctx.elfs {
                                 if !elf_metadata.is_executable {
@@ -659,9 +661,10 @@ pub(crate) struct PackageAfterCheck {}
 impl ArtifactCheck for PackageAfterCheck {
     fn artifact_context_check(
         &self,
+        store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
-        _artifact_cache: &ArtifactCache,
+        _artifact_cache: &mut ArtifactCache,
         _artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
         let mut violations = vec![];

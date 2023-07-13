@@ -378,9 +378,11 @@ where
     }
 
     fn package_ident(&self, target: PackageTarget) -> Option<PackageIdent> {
-        let mut components = self.as_ref().components();
-
-        components.next();
+        let path = self.as_ref();
+        let mut components = path.components();
+        if path.is_absolute() {
+            components.next();
+        }
         let hab_folder = components.next().and_then(|c| c.as_os_str().to_str());
         let pkg_folder = components.next().and_then(|c| c.as_os_str().to_str());
         let origin = components.next().and_then(|c| c.as_os_str().to_str());

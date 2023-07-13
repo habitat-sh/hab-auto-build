@@ -61,6 +61,7 @@ rust-embed = "6.6.1"
 tokio = "1.28.1"
 mime_guess = "2.0.4"
 filetime = "0.2.21"
+rayon = "1.7.0"
 
 [build-dependencies]
 color-eyre = { version = "0.6", default-features = false }

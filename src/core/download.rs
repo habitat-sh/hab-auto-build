@@ -9,7 +9,7 @@ use reqwest::{
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::{Path, PathBuf}, time::Instant,
 };
 use suppaftp::FtpStream;
 use tracing::{debug, log::error};
@@ -192,7 +192,8 @@ impl Download {
 
         match file_content_length {
             Some(file_content_length) => {
-                debug!("Starting mult-threaded download of file from {}", url);
+                let start = Instant::now();
+                debug!("Starting multi-threaded download of file from {}", url);
                 let ranges = Download::calculate_ranges(file_content_length);
                 std::thread::scope(|scope| {
                     let mut children = vec![];
@@ -243,16 +244,26 @@ impl Download {
                         let _ = child.join();
                     }
                 });
-
+                debug!(
+                    "Finished multi-threaded download of file from {} in {}s",
+                    url,
+                    start.elapsed().as_secs_f32()
+                );
                 Ok(())
             }
             None => {
+                let start = Instant::now();
                 debug!("Starting single-threaded download of file from {}", url);
-                let request = reqwest::blocking::Request::new(Method::GET, url);
+                let request = reqwest::blocking::Request::new(Method::GET, url.clone());
                 let response = Download::execute_request(&client, request)?;
                 let mut file = File::create(self.filename)?;
                 file.write_all(&response.bytes()?)?;
                 file.sync_all()?;
+                debug!(
+                    "Finished single-threaded download of file from {} in {}s",
+                    url,
+                    start.elapsed().as_secs_f32()
+                );
                 Ok(())
             }
         }

@@ -11,6 +11,7 @@ use crate::{
         LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, ElfType, GlobSetExpression, PackageIdent, PackagePath},
+    store::Store,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -694,9 +695,10 @@ pub(crate) struct ElfCheck {}
 impl ArtifactCheck for ElfCheck {
     fn artifact_context_check(
         &self,
+        store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
-        _artifact_cache: &ArtifactCache,
+        _artifact_cache: &mut ArtifactCache,
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
         let mut violations = vec![];
@@ -1072,7 +1074,7 @@ impl ArtifactCheck for ElfCheck {
                                 let resolved_path =
                                     artifact.resolve_path(tdep_artifacts, library_path.as_path());
                                 if resolved_path != library_path {
-                                    debug!(
+                                    trace!(
                                         "In {}, following shared library path: {} -> {}",
                                         path.display(),
                                         library_path.display(),
@@ -1179,7 +1181,7 @@ impl ArtifactCheck for ElfCheck {
                                 let resolved_path =
                                     artifact.resolve_path(tdep_artifacts, library_path.as_path());
                                 if resolved_path != library_path {
-                                    debug!(
+                                    trace!(
                                         "In {}, following shared library path: {} -> {}",
                                         path.display(),
                                         library_path.display(),

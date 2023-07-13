@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     fs::File,
     io::{BufReader, Read},
-    path::{Path, PathBuf},
+    path::{Path, PathBuf}, time::Instant,
 };
 
 use askalono::{ScanMode, ScanStrategy, Store, TextData};
@@ -11,9 +11,10 @@ use color_eyre::eyre::Result;
 use flate2::bufread::GzDecoder;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use lazy_static::lazy_static;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
-use tracing::{error, trace};
+use tracing::{error, trace, debug};
 use xz2::bufread::XzDecoder;
 
 use super::{FileKind, PackageSha256Sum};
@@ -179,42 +180,50 @@ impl SourceContext {
     where
         R: Read,
     {
-        let mut licenses = BTreeSet::new();
+        let start = Instant::now();
         let strategy = ScanStrategy::new(&*LICENSE_STORE)
             .confidence_threshold(0.8)
             .mode(ScanMode::TopDown)
             .shallow_limit(0.98)
             .max_passes(50)
             .optimize(true);
+        let mut license_files = Vec::new();
         for entry in tar.entries()? {
             let mut entry = entry?;
             let path = entry.path()?.to_path_buf();
             if LICENSE_GLOBSET.is_match(path.as_path()) {
-                trace!("Scanning file {} for licenses", path.display());
                 let mut text = String::new();
                 if entry.read_to_string(&mut text).is_ok() {
-                    let data = TextData::from(text.clone());
-                    let mut detected_licenses = BTreeSet::new();
-                    if let Ok(results) = strategy.scan(&data) {
-                        for item in results.containing {
-                            detected_licenses.insert(item.license.name.to_string());
-                        }
-                    }
-                    trace!(
-                        "Including license file {} in source context, with detected licenses: {:?}",
-                        path.display(),
-                        detected_licenses
-                    );
-                    licenses.insert(SourceLicenseContext {
-                        path,
-                        text,
-                        detected_licenses,
-                    });
+                    license_files.push((path, text));
                 } else {
                     error!(target: "user-log", "Failed to read file {} in archive", path.display());
                 }
             }
         }
+        // Detect licenses in parallel
+        let licenses = license_files
+            .into_par_iter()
+            .map(|(path, text)| {
+                trace!("Scanning file {} for licenses", path.display());
+                let mut detected_licenses = BTreeSet::new();
+                if let Ok(results) = strategy.scan(&TextData::new(&text)) {
+                    for item in results.containing {
+                        detected_licenses.insert(item.license.name.to_string());
+                    }
+                }
+                trace!(
+                    "Including license file {} in source context, with detected licenses: {:?}",
+                    path.display(),
+                    detected_licenses
+                );
+                SourceLicenseContext {
+                    path,
+                    text,
+                    detected_licenses,
+                }
+            })
+            .collect();
+        debug!("Completed scanning for licenses in archive in {}s", start.elapsed().as_secs_f32());
         Ok(licenses)
     }
 }

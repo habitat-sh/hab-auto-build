@@ -8,8 +8,8 @@ use std::{
 
 use crate::{
     core::{
-        ArtifactContext, Blake3, PackageBuildIdent, PackageSha256Sum, PackageSource,
-        PlanContextPath, SourceContext,
+        ArtifactContext, Blake3, InnerArtifactContext, PackageBuildIdent, PackageSha256Sum,
+        PackageSource, PlanContextPath, SourceContext,
     },
     store::model::SourceContextRecord,
 };
@@ -25,8 +25,9 @@ use diesel::{
     update,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use lazy_static::__Deref;
 use tempdir::TempDir;
-use tracing::debug;
+use tracing::{debug, trace};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.9f";
@@ -133,6 +134,7 @@ impl AsRef<Path> for PackageSourceLicenseStorePath {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Store {
     path: StorePath,
     pool: Pool<ConnectionManager<SqliteConnection>>,
@@ -181,7 +183,7 @@ impl Store {
     }
 
     pub fn get_connection(&self) -> Result<PooledConnection<ConnectionManager<SqliteConnection>>> {
-        debug!("Opening database connection");
+        trace!("Opening database connection");
         Ok(self.pool.get()?)
     }
 
@@ -352,7 +354,9 @@ pub(crate) fn artifact_context_get(
         .load::<ArtifactContextRecord>(connection)?
         .first()
     {
-        Ok(Some(serde_json::from_str(&row.context)?))
+        Ok(Some(
+            serde_json::from_str::<InnerArtifactContext>(&row.context)?.into(),
+        ))
     } else {
         Ok(None)
     }
@@ -367,7 +371,7 @@ pub(crate) fn artifact_context_put(
     insert_into(artifact_contexts)
         .values((
             hash.eq(hash_value.to_string()),
-            context.eq(serde_json::to_string(artifact_context_value)?),
+            context.eq(serde_json::to_string(artifact_context_value.deref())?),
         ))
         .execute(connection)?;
     Ok(())

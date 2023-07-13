@@ -27,9 +27,9 @@ use crate::{
 };
 
 use super::{
-    ArtifactCache, ArtifactContext, Metadata, PackageBuildIdent, PackageBuildVersion,
-    PackageDepIdent, PackageIdent, PackageName, PackageOrigin, PackageResolvedDepIdent,
-    PackageSource, PackageTarget, RepoContext, RepoContextID,
+    ArtifactCache, ArtifactContext, Metadata, MinimalArtifactContext, PackageBuildIdent,
+    PackageBuildVersion, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
+    PackageResolvedDepIdent, PackageSource, PackageTarget, RepoContext, RepoContextID,
 };
 
 lazy_static! {
@@ -317,8 +317,8 @@ impl PlanContext {
                 files_changed_on_git: Vec::new(),
                 plan_config,
             };
-            let latest_artifact = artifact_cache.latest_plan_artifact(&plan_ctx.id);
-            plan_ctx.determine_changes(connection, modification_index, latest_artifact)?;
+            let latest_artifact = artifact_cache.latest_plan_minimal_artifact(&plan_ctx.id);
+            plan_ctx.determine_changes(connection, modification_index, latest_artifact.as_ref())?;
             Ok(plan_ctx)
         } else {
             Err(eyre!(
@@ -335,7 +335,7 @@ impl PlanContext {
         &mut self,
         mut connection: Option<&mut SqliteConnection>,
         modification_index: Option<&ModificationIndex>,
-        artifact_ctx: Option<&ArtifactContext>,
+        artifact_ctx: Option<&MinimalArtifactContext>,
     ) -> Result<()> {
         let plan_ctx_walker = WalkBuilder::new(self.context_path.as_ref())
             .standard_filters(false)

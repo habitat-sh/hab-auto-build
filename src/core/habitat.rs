@@ -295,7 +295,7 @@ pub(crate) fn native_package_build(
         let deps_to_install = build_step
             .deps_to_install
             .iter()
-            .filter_map(|dep| artifact_cache.latest_plan_artifact(dep))
+            .filter_map(|dep| artifact_cache.latest_plan_minimal_artifact(dep))
             .map(|artifact| {
                 format!(
                     "{}",
@@ -461,7 +461,7 @@ pub(crate) fn bootstrap_package_build(
     let deps_to_install = build_step
         .deps_to_install
         .iter()
-        .filter_map(|dep| artifact_cache.latest_plan_artifact(dep))
+        .filter_map(|dep| artifact_cache.latest_plan_minimal_artifact(dep))
         .map(|artifact| {
             format!(
                 "{}",
@@ -501,7 +501,7 @@ pub(crate) fn bootstrap_package_build(
 
     install_artifact_offline(
         &artifact_cache
-            .latest_artifact(
+            .latest_minimal_artifact(
                 &build_step
                     .studio_package
                     .unwrap()
@@ -641,7 +641,7 @@ pub(crate) fn standard_package_build(
     let deps_to_install = build_step
         .deps_to_install
         .iter()
-        .filter_map(|dep| artifact_cache.latest_plan_artifact(dep))
+        .filter_map(|dep| artifact_cache.latest_plan_minimal_artifact(dep))
         .map(|artifact| {
             format!(
                 "{}",
@@ -681,7 +681,7 @@ pub(crate) fn standard_package_build(
 
     install_artifact_offline(
         &artifact_cache
-            .latest_artifact(
+            .latest_minimal_artifact(
                 &build_step
                     .studio_package
                     .unwrap()

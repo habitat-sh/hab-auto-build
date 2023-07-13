@@ -6,8 +6,11 @@ use std::{
     fmt::Display,
 };
 
-use crate::core::{
-    ArtifactCache, ArtifactContext, PackageIdent, PackageTarget, PlanContext, SourceContext,
+use crate::{
+    core::{
+        ArtifactCache, ArtifactContext, PackageIdent, PackageTarget, PlanContext, SourceContext,
+    },
+    store::Store,
 };
 
 use color_eyre::{
@@ -474,9 +477,10 @@ pub(crate) trait SourceCheck {
 pub(crate) trait ArtifactCheck {
     fn artifact_context_check(
         &self,
+        store: &Store,
         plan_config: &PlanContextConfig,
         checker_context: &mut CheckerContext,
-        artifact_cache: &ArtifactCache,
+        artifact_cache: &mut ArtifactCache,
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation>;
 }
@@ -558,15 +562,17 @@ impl SourceCheck for Checker {
 impl ArtifactCheck for Checker {
     fn artifact_context_check(
         &self,
+        store: &Store,
         plan_config: &PlanContextConfig,
         checker_context: &mut CheckerContext,
-        artifact_cache: &ArtifactCache,
+        artifact_cache: &mut ArtifactCache,
         artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
         debug!("Checking package artifact for issues");
         let mut violations = Vec::new();
         for artifact_check in self.artifact_checks.iter() {
             let mut artifact_violations = artifact_check.artifact_context_check(
+                store,
                 plan_config,
                 checker_context,
                 artifact_cache,

@@ -39,9 +39,10 @@ use crate::{
 use super::{
     habitat::{self, BuildError},
     BuildOrder, ChangeDetectionMode, DepGraph, DepGraphData, DependencyChangeCause,
-    PackageBuildVersion, PackageDepGlob, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
-    PackageSha256Sum, PackageSource, PackageTarget, PlanContext, PlanContextID,
-    PlanContextPathGitSyncStatus, PlanScannerBuilder, RepoConfig, RepoContext, RepoContextID,
+    LazyArtifactContext, PackageBuildVersion, PackageDepGlob, PackageDepIdent, PackageIdent,
+    PackageName, PackageOrigin, PackageSha256Sum, PackageSource, PackageTarget, PlanContext,
+    PlanContextID, PlanContextPathGitSyncStatus, PlanScannerBuilder, RepoConfig, RepoContext,
+    RepoContextID,
 };
 
 lazy_static! {
@@ -862,7 +863,7 @@ impl AutoBuildContext {
                     let causes = plan_node_changes.get(&plan_node_index);
                     if causes.is_none() {
                         let latest_plan_artifact = artifact_cache
-                            .latest_plan_artifact(&plan_ctx.id)
+                            .latest_plan_minimal_artifact(&plan_ctx.id)
                             .expect("Plan artifact must be present");
 
                         // Delete any modifications for the plan context that may be present
@@ -873,7 +874,7 @@ impl AutoBuildContext {
                         plan_ctx.determine_changes(
                             Some(connection),
                             None,
-                            Some(latest_plan_artifact),
+                            Some(&latest_plan_artifact),
                         )?;
                         if plan_ctx.files_changed_on_disk.is_empty() {
                             let alternate_modified_at =
@@ -888,7 +889,7 @@ impl AutoBuildContext {
                             plan_ctx.determine_changes(
                                 Some(connection),
                                 None,
-                                Some(latest_plan_artifact),
+                                Some(&latest_plan_artifact),
                             )?;
                         }
                         debug!(
@@ -989,7 +990,7 @@ impl AutoBuildContext {
                             continue;
                         }
                         let latest_plan_artifact = artifact_cache
-                            .latest_plan_artifact(&plan_ctx.id)
+                            .latest_plan_minimal_artifact(&plan_ctx.id)
                             .expect("Plan artifact must be present");
                         // Delete any modifications for the plan context that may be present
                         store::plan_context_alternate_modified_at_delete(
@@ -999,7 +1000,9 @@ impl AutoBuildContext {
                         plan_ctx.determine_changes(
                             Some(connection),
                             None,
-                            artifact_cache.latest_plan_artifact(&plan_ctx.id),
+                            artifact_cache
+                                .latest_plan_minimal_artifact(&plan_ctx.id)
+                                .as_ref(),
                         )?;
                         if !plan_ctx.files_changed_on_disk.is_empty() {
                             for changed_file in plan_ctx.files_changed_on_disk.iter() {
@@ -1014,7 +1017,9 @@ impl AutoBuildContext {
                             plan_ctx.determine_changes(
                                 Some(connection),
                                 None,
-                                artifact_cache.latest_plan_artifact(&plan_ctx.id),
+                                artifact_cache
+                                    .latest_plan_minimal_artifact(&plan_ctx.id)
+                                    .as_ref(),
                             )?;
                         }
                         results.push(RemoveStatus::Removed(plan_ctx.id.clone()));
@@ -1213,19 +1218,20 @@ impl AutoBuildContext {
     }
 
     pub fn package_check(&self, package_index: NodeIndex) -> Result<PlanCheckStatus> {
-        let artifact_cache = self.artifact_cache.read().unwrap();
+        let mut artifact_cache = self.artifact_cache.write().unwrap();
         let (plan_config, artifact) = {
             match &self.dep_graph.build_graph[package_index] {
-                Dependency::ResolvedDep(ident) => {
-                    (PlanContextConfig::default(), artifact_cache.artifact(ident))
-                }
+                Dependency::ResolvedDep(ident) => (
+                    PlanContextConfig::default(),
+                    artifact_cache.artifact(ident)?,
+                ),
                 Dependency::RemoteDep(resolved_dep_ident) => (
                     PlanContextConfig::default(),
-                    artifact_cache.latest_artifact(resolved_dep_ident),
+                    artifact_cache.latest_artifact(resolved_dep_ident)?,
                 ),
                 Dependency::LocalPlan(plan_ctx) => (
                     plan_ctx.config(),
-                    artifact_cache.latest_plan_artifact(&plan_ctx.id),
+                    artifact_cache.latest_plan_artifact(&plan_ctx.id)?,
                 ),
             }
         };
@@ -1245,10 +1251,11 @@ impl AutoBuildContext {
             let checker = Checker::new();
             let mut checker_context = CheckerContext::default();
             Some(checker.artifact_context_check(
+                &self.store,
                 &plan_config,
                 &mut checker_context,
-                &artifact_cache,
-                artifact,
+                &mut artifact_cache,
+                &artifact,
             ))
         } else {
             None
@@ -1279,15 +1286,19 @@ impl AutoBuildContext {
             }
         };
         // Add the artifact to the cache
-        let artifact_ident = artifact_cache.artifact_add(&self.store, build_output.artifact)?;
-        let artifact_ctx = artifact_cache.artifact(&artifact_ident).unwrap();
+        let artifact_ident = artifact_cache.artifact_add(
+            (&self.store).into(),
+            LazyArtifactContext::Loaded(build_output.artifact),
+        )?;
+        let artifact_ctx = artifact_cache.artifact(&artifact_ident)?.unwrap();
         // Check the artifact for violations
         let checker = Checker::new();
         let mut checker_context = CheckerContext::default();
         let artifact_violations = checker.artifact_context_check(
+            &self.store,
             &build_step.plan_ctx.config(),
             &mut checker_context,
-            &artifact_cache,
+            &mut artifact_cache,
             &artifact_ctx,
         );
         let elapsed_duration_in_secs = start.elapsed().as_secs() as i32;
