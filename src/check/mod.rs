@@ -22,11 +22,14 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{Array, Document, Formatted, InlineTable, Value};
 use tracing::debug;
 
+#[cfg(target_os = "linux")]
+use self::artifact::elf::{ElfCheck, ElfRule, ElfRuleOptions};
+#[cfg(target_os = "macos")]
+use self::artifact::macho::{MachORule, MachORuleOptions};
+
 use self::{
-    artifact::elf::{ElfCheck, ElfRule},
     artifact::package::{PackageBeforeCheck, PackageRule},
     artifact::{
-        elf::ElfRuleOptions,
         package::{PackageAfterCheck, PackageRuleOptions},
         script::{ScriptCheck, ScriptRule, ScriptRuleOptions},
     },
@@ -60,6 +63,7 @@ pub(crate) enum RuleConfig {
 pub(crate) struct PlanContextConfig {
     #[serde(default, rename = "docker-image")]
     pub docker_image: Option<String>,
+    pub sandbox: Option<bool>,
     #[serde(default)]
     pub source_rules: Vec<SourceRule>,
     #[serde(default)]
@@ -131,6 +135,7 @@ impl PlanContextConfig {
                     .header("Restructured Rules:")
             })?;
         let mut context_rules = PlanContextConfig {
+            sandbox: document.get("sandbox").and_then(|value| value.as_bool()),
             docker_image: document
                 .get("docker-image")
                 .map(|value| {
@@ -157,163 +162,212 @@ impl PlanContextConfig {
 
 impl Default for PlanContextConfig {
     fn default() -> Self {
-        Self {
+        let mut license_rules = vec![
+            SourceRule {
+                options: SourceRuleOptions::License(LicenseRuleOptions::MissingLicense(
+                    Default::default(),
+                )),
+            },
+            SourceRule {
+                options: SourceRuleOptions::License(LicenseRuleOptions::LicenseNotFound(
+                    Default::default(),
+                )),
+            },
+            SourceRule {
+                options: SourceRuleOptions::License(LicenseRuleOptions::InvalidLicenseExpression(
+                    Default::default(),
+                )),
+            },
+        ];
+        #[cfg(target_os = "linux")]
+        let mut elf_rules = vec![
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::MissingRPathEntryDependency(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(
+                    ElfRuleOptions::BadRPathEntry(Default::default()),
+                ),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::UnusedRPathEntry(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::MissingRunPathEntryDependency(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::BadRunPathEntry(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::UnusedRunPathEntry(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::LibraryDependencyNotFound(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::BadLibraryDependency(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::BadELFInterpreter(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::HostELFInterpreter(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::ELFInterpreterNotFound(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::MissingELFInterpreterDependency(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Elf(ElfRuleOptions::UnexpectedELFInterpreter(
+                    Default::default(),
+                )),
+            },
+        ];
+        #[cfg(target_os = "macos")]
+        let mut macho_rules = vec![
+            ArtifactRule {
+                options: ArtifactRuleOptions::MachO(MachORuleOptions::MissingRPathEntryDependency(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::MachO(MachORuleOptions::BadRPathEntry(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::MachO(MachORuleOptions::UnusedRPathEntry(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::MachO(MachORuleOptions::MissingLibraryDependency(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::MachO(MachORuleOptions::LibraryDependencyNotFound(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::MachO(MachORuleOptions::BadLibraryDependency(
+                    Default::default(),
+                )),
+            },
+        ];
+        let mut package_rules = vec![
+            ArtifactRule {
+                options: ArtifactRuleOptions::Package(PackageRuleOptions::BadRuntimePathEntry(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Package(
+                    PackageRuleOptions::MissingRuntimePathEntryDependency(Default::default()),
+                ),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Package(
+                    PackageRuleOptions::MissingDependencyArtifact(Default::default()),
+                ),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Package(PackageRuleOptions::DuplicateDependency(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Package(PackageRuleOptions::EmptyTopLevelDirectory(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Package(PackageRuleOptions::BrokenLink(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Package(PackageRuleOptions::UnusedDependency(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Package(PackageRuleOptions::DuplicateRuntimeBinary(
+                    Default::default(),
+                )),
+            },
+        ];
+        let mut script_rules = vec![
+            ArtifactRule {
+                options: ArtifactRuleOptions::Script(ScriptRuleOptions::HostScriptInterpreter(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Script(
+                    ScriptRuleOptions::MissingEnvScriptInterpreter(Default::default()),
+                ),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Script(
+                    ScriptRuleOptions::EnvScriptInterpreterNotFound(Default::default()),
+                ),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Script(ScriptRuleOptions::ScriptInterpreterNotFound(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Script(ScriptRuleOptions::UnlistedScriptInterpreter(
+                    Default::default(),
+                )),
+            },
+            ArtifactRule {
+                options: ArtifactRuleOptions::Script(
+                    ScriptRuleOptions::MissingScriptInterpreterDependency(Default::default()),
+                ),
+            },
+        ];
+        let mut config = Self {
+            sandbox: None,
             docker_image: None,
-            source_rules: vec![
-                SourceRule {
-                    options: SourceRuleOptions::License(LicenseRuleOptions::MissingLicense(
-                        Default::default(),
-                    )),
-                },
-                SourceRule {
-                    options: SourceRuleOptions::License(LicenseRuleOptions::LicenseNotFound(
-                        Default::default(),
-                    )),
-                },
-                SourceRule {
-                    options: SourceRuleOptions::License(
-                        LicenseRuleOptions::InvalidLicenseExpression(Default::default()),
-                    ),
-                },
-            ],
-            artifact_rules: vec![
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::MissingRPathEntryDependency(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::BadRPathEntry(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::UnusedRPathEntry(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(
-                        ElfRuleOptions::MissingRunPathEntryDependency(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::BadRunPathEntry(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::UnusedRunPathEntry(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::LibraryDependencyNotFound(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::BadLibraryDependency(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::BadELFInterpreter(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::HostELFInterpreter(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::ELFInterpreterNotFound(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(
-                        ElfRuleOptions::MissingELFInterpreterDependency(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Elf(ElfRuleOptions::UnexpectedELFInterpreter(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Package(PackageRuleOptions::BadRuntimePathEntry(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Package(
-                        PackageRuleOptions::MissingRuntimePathEntryDependency(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Package(
-                        PackageRuleOptions::MissingDependencyArtifact(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Package(PackageRuleOptions::DuplicateDependency(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Package(
-                        PackageRuleOptions::EmptyTopLevelDirectory(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Package(PackageRuleOptions::BrokenLink(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Package(PackageRuleOptions::UnusedDependency(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Package(
-                        PackageRuleOptions::DuplicateRuntimeBinary(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Script(ScriptRuleOptions::HostScriptInterpreter(
-                        Default::default(),
-                    )),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Script(
-                        ScriptRuleOptions::MissingEnvScriptInterpreter(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Script(
-                        ScriptRuleOptions::EnvScriptInterpreterNotFound(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Script(
-                        ScriptRuleOptions::ScriptInterpreterNotFound(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Script(
-                        ScriptRuleOptions::UnlistedScriptInterpreter(Default::default()),
-                    ),
-                },
-                ArtifactRule {
-                    options: ArtifactRuleOptions::Script(
-                        ScriptRuleOptions::MissingScriptInterpreterDependency(Default::default()),
-                    ),
-                },
-            ],
-        }
+            source_rules: vec![],
+            artifact_rules: vec![],
+        };
+        config.source_rules.append(&mut license_rules);
+        config.artifact_rules.append(&mut package_rules);
+        config.artifact_rules.append(&mut script_rules);
+        #[cfg(target_os = "linux")]
+        config.artifact_rules.append(&mut elf_rules);
+        #[cfg(target_os = "macos")]
+        config.artifact_rules.append(&mut macho_rules);
+        config
     }
 }
 
@@ -334,11 +388,13 @@ pub(crate) struct ArtifactRule {
     #[serde(flatten)]
     options: ArtifactRuleOptions,
 }
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub(crate) enum ArtifactRuleOptions {
+    #[cfg(target_os = "linux")]
     Elf(ElfRuleOptions),
+    #[cfg(target_os = "macos")]
+    MachO(MachORuleOptions),
     Package(PackageRuleOptions),
     Script(ScriptRuleOptions),
 }
@@ -441,8 +497,12 @@ impl Display for LeveledArtifactCheckViolation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "category")]
 pub(crate) enum ArtifactCheckViolation {
+    #[cfg(target_os = "linux")]
     #[serde(rename = "elf")]
     Elf(ElfRule),
+    #[cfg(target_os = "macos")]
+    #[serde(rename = "macho")]
+    MachO(MachORule),
     #[serde(rename = "package")]
     Package(PackageRule),
     #[serde(rename = "script")]
@@ -452,7 +512,10 @@ pub(crate) enum ArtifactCheckViolation {
 impl Display for ArtifactCheckViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(target_os = "linux")]
             ArtifactCheckViolation::Elf(rule) => write!(f, "{}", rule),
+            #[cfg(target_os = "macos")]
+            ArtifactCheckViolation::MachO(rule) => write!(f, "{}", rule),
             ArtifactCheckViolation::Package(rule) => write!(f, "{}", rule),
             ArtifactCheckViolation::Script(rule) => write!(f, "{}", rule),
         }
@@ -506,6 +569,21 @@ pub(crate) struct Checker {
 }
 
 impl Checker {
+    #[cfg(target_os = "macos")]
+    pub fn new() -> Checker {
+        use self::artifact::macho::MachOCheck;
+
+        Checker {
+            source_checks: vec![Box::new(LicenseCheck::default())],
+            artifact_checks: vec![
+                Box::new(PackageBeforeCheck::default()),
+                Box::new(MachOCheck::default()),
+                Box::new(ScriptCheck::default()),
+                Box::new(PackageAfterCheck::default()),
+            ],
+        }
+    }
+    #[cfg(target_os = "linux")]
     pub fn new() -> Checker {
         Checker {
             source_checks: vec![Box::new(LicenseCheck::default())],

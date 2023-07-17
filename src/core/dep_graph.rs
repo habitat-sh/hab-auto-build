@@ -484,11 +484,34 @@ impl DepGraph {
                         }
                         (false, false) => {
                             if !plan_ctx.is_native {
-                                dep_graph.build_graph.add_edge(
-                                    dep_node_index,
-                                    standard_build_studio_node_index,
-                                    DependencyType::Studio,
-                                );
+                                match (
+                                    &dep_graph.build_graph[bootstrap_build_studio_node_index],
+                                    &dep_graph.build_graph[standard_build_studio_node_index],
+                                ) {
+                                    (Dependency::ResolvedDep(_), Dependency::ResolvedDep(_))
+                                    | (Dependency::ResolvedDep(_), Dependency::LocalPlan(_))
+                                    | (Dependency::RemoteDep(_), Dependency::ResolvedDep(_))
+                                    | (Dependency::RemoteDep(_), Dependency::RemoteDep(_))
+                                    | (Dependency::RemoteDep(_), Dependency::LocalPlan(_))
+                                    | (Dependency::LocalPlan(_), Dependency::ResolvedDep(_))
+                                    | (Dependency::LocalPlan(_), Dependency::LocalPlan(_)) => {
+                                        dep_graph.build_graph.add_edge(
+                                            dep_node_index,
+                                            standard_build_studio_node_index,
+                                            DependencyType::Studio,
+                                        );
+                                    }
+                                    // Use the bootstrap studio if there is a local / resolved bootstrap 
+                                    // studio plan and no local / resolved standard studio plan
+                                    (Dependency::ResolvedDep(_), Dependency::RemoteDep(_))
+                                    | (Dependency::LocalPlan(_), Dependency::RemoteDep(_)) => {
+                                        dep_graph.build_graph.add_edge(
+                                            dep_node_index,
+                                            bootstrap_build_studio_node_index,
+                                            DependencyType::Studio,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

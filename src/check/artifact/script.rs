@@ -347,7 +347,14 @@ impl Default for ScriptCheck {
     fn default() -> Self {
         Self {
             env_interpreters: vec![String::from("env")],
+            #[cfg(target_os = "linux")]
             platform_interpreter_paths: vec![PathBuf::from("/bin/sh"), PathBuf::from("/bin/false")],
+            #[cfg(target_os = "macos")]
+            platform_interpreter_paths: vec![
+                PathBuf::from("/bin/sh"),
+                PathBuf::from("/bin/false"),
+                PathBuf::from("/usr/bin/env"),
+            ],
         }
     }
 }
@@ -560,6 +567,14 @@ impl ArtifactCheck for ScriptCheck {
                         .is_some()
                         || interpreter_artifact_ctx
                             .scripts
+                            .get(command.as_path())
+                            .is_some()
+                        || interpreter_artifact_ctx
+                            .links
+                            .get(command.as_path())
+                            .is_some()
+                        || interpreter_artifact_ctx
+                            .machos
                             .get(command.as_path())
                             .is_some()
                     {

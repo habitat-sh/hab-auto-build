@@ -10,6 +10,7 @@ use goblin::{
         dynamic::DF_1_PIE,
         header::{ET_DYN, ET_EXEC},
     },
+    mach::{load_command::CommandVariant, Mach, SingleArch},
     Object,
 };
 use ignore::{ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
@@ -424,6 +425,78 @@ impl Display for ElfType {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct MachOMetadata {
+    pub archs: Vec<SingleArchMachOMetadata>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct SingleArchMachOMetadata {
+    pub arch: (u32, u32),
+    pub name: Option<String>,
+    pub required_libraries: Vec<String>,
+    pub rpath: Vec<PathBuf>,
+    pub file_type: MachOType,
+}
+
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum MachOType {
+    #[serde(rename = "object")]
+    Object,
+    #[serde(rename = "executable")]
+    Executable,
+    #[serde(rename = "dynamic-library")]
+    DynamicLibrary,
+    #[serde(rename = "preload")]
+    Preload,
+    #[serde(rename = "core")]
+    Core,
+    #[serde(rename = "dynamic-linker")]
+    DynamicLinker,
+    #[serde(rename = "bundle")]
+    Bundle,
+    #[serde(rename = "dynamic-library-stub")]
+    DynamicLibraryStub,
+    #[serde(rename = "debug-symbols")]
+    DebugSymbols,
+    #[serde(rename = "other")]
+    Other(u32),
+}
+
+impl Display for MachOType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MachOType::Object => write!(f, "object"),
+            MachOType::Executable => write!(f, "executable"),
+            MachOType::DynamicLibrary => write!(f, "dynamic-library"),
+            MachOType::Preload => write!(f, "preload"),
+            MachOType::Core => write!(f, "core"),
+            MachOType::DynamicLinker => write!(f, "dynamic-linker"),
+            MachOType::Bundle => write!(f, "bundle"),
+            MachOType::DynamicLibraryStub => write!(f, "dynamic-library-stub"),
+            MachOType::DebugSymbols => write!(f, "debug-symbols"),
+            MachOType::Other(_) => write!(f, "other"),
+        }
+    }
+}
+
+impl From<u32> for MachOType {
+    fn from(value: u32) -> Self {
+        match value {
+            0x1 => MachOType::Object,
+            0x2 => MachOType::Executable,
+            0x4 => MachOType::Core,
+            0x5 => MachOType::Preload,
+            0x6 => MachOType::DynamicLibrary,
+            0x7 => MachOType::DynamicLinker,
+            0x8 => MachOType::Bundle,
+            0x9 => MachOType::DynamicLibraryStub,
+            0xA => MachOType::DebugSymbols,
+            value => MachOType::Other(value),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ScriptMetadata {
     pub interpreter: ScriptInterpreterMetadata,
     pub is_executable: bool,
@@ -474,6 +547,7 @@ pub(crate) struct InnerArtifactContext {
     pub source: Option<PackageSource>,
     pub licenses: Vec<String>,
     pub elfs: HashMap<PathBuf, ElfMetadata>,
+    pub machos: HashMap<PathBuf, MachOMetadata>,
     pub empty_top_level_dirs: HashSet<PathBuf>,
     pub links: BTreeMap<PathBuf, PathBuf>,
     pub broken_links: HashMap<PathBuf, PathBuf>,
@@ -534,6 +608,7 @@ enum IndexedArtifactItem {
     Interpreters(Vec<PathBuf>),
     Script((PathBuf, ScriptMetadata)),
     Elf((PathBuf, ElfMetadata)),
+    MachO((PathBuf, MachOMetadata)),
 }
 
 impl ArtifactContext {
@@ -675,6 +750,7 @@ impl ArtifactContext {
         let mut links = BTreeMap::new();
         let mut scripts = HashMap::new();
         let mut elfs = HashMap::new();
+        let mut machos = HashMap::new();
 
         let indexed_item_batches = tar
             .entries()?
@@ -734,11 +810,15 @@ impl ArtifactContext {
                 if !matches.is_empty() {
                     let mut data = String::new();
                     entry.read_to_string(&mut data)?;
-                    return Ok::<_, color_eyre::eyre::Error>(Some(RawArtifactItem::MetaFile(file_name.to_string(), data)));
+                    return Ok::<_, color_eyre::eyre::Error>(Some(RawArtifactItem::MetaFile(
+                        file_name.to_string(),
+                        data,
+                    )));
                 } else {
-                    if let Some((kind, data)) =
-                        FileKind::maybe_read_file(entry, &[FileKind::Elf, FileKind::Script])
-                    {
+                    if let Some((kind, data)) = FileKind::maybe_read_file(
+                        entry,
+                        &[FileKind::Elf, FileKind::Script, FileKind::MachBinary],
+                    ) {
                         return Ok::<_, color_eyre::eyre::Error>(Some(RawArtifactItem::Resource(
                             entry_install_path,
                             file_mode,
@@ -874,6 +954,9 @@ impl ArtifactContext {
                                 Resource::Script(metadata) => {
                                     vec![IndexedArtifactItem::Script((path, metadata))]
                                 }
+                                Resource::MachO(metadata) => {
+                                    vec![IndexedArtifactItem::MachO((path, metadata))]
+                                }
                             })
                         }
                     }
@@ -922,6 +1005,9 @@ impl ArtifactContext {
                     }
                     IndexedArtifactItem::Elf((path, metadata)) => {
                         elfs.insert(path, metadata);
+                    }
+                    IndexedArtifactItem::MachO((path, metadata)) => {
+                        machos.insert(path, metadata);
                     }
                 }
             }
@@ -984,6 +1070,7 @@ impl ArtifactContext {
             links,
             scripts,
             elfs,
+            machos,
             hash: hash.clone(),
             is_dirty: true,
         }
@@ -1287,6 +1374,7 @@ impl<'a> ParallelVisitor for ArtifactIndexer<'a> {
 
 pub(crate) enum Resource {
     Elf(ElfMetadata),
+    MachO(MachOMetadata),
     Script(ScriptMetadata),
 }
 
@@ -1319,76 +1407,125 @@ impl Resource {
                     is_executable: file_mode & 0o111 != 0,
                 }))
             }
-            FileKind::Elf => {
+            FileKind::Elf | FileKind::MachBinary => {
                 let object = Object::parse(&data)?;
                 // Determine the exact elf type, for more details check the following:
                 // ELF Header (Section 1-3): https://www.cs.cmu.edu/afs/cs/academic/class/15213-f00/docs/elf.pdf
                 // https://unix.stackexchange.com/questions/89211/how-to-test-whether-a-linux-binary-was-compiled-as-position-independent-code/435038#435038
-                if let Object::Elf(object) = object {
-                    let is_executable = file_mode & 0o111 != 0;
-                    let elf_type = if object.header.e_type == ET_DYN {
-                        if let Some(dynamic) = object.dynamic {
-                            if dynamic.info.flags_1 & DF_1_PIE == DF_1_PIE {
-                                ElfType::PieExecutable
+                match object {
+                    Object::Elf(object) => {
+                        let is_executable = file_mode & 0o111 != 0;
+                        let elf_type = if object.header.e_type == ET_DYN {
+                            if let Some(dynamic) = object.dynamic {
+                                if dynamic.info.flags_1 & DF_1_PIE == DF_1_PIE {
+                                    ElfType::PieExecutable
+                                } else {
+                                    ElfType::SharedLibrary
+                                }
+                            } else if is_executable {
+                                ElfType::Executable
                             } else {
                                 ElfType::SharedLibrary
                             }
-                        } else if is_executable {
+                        } else if object.header.e_type == ET_EXEC {
                             ElfType::Executable
                         } else {
-                            ElfType::SharedLibrary
-                        }
-                    } else if object.header.e_type == ET_EXEC {
-                        ElfType::Executable
-                    } else {
-                        ElfType::Other
-                    };
+                            ElfType::Other
+                        };
 
-                    Ok(Resource::Elf(ElfMetadata {
-                        required_libraries: object
-                            .libraries
-                            .into_iter()
-                            .map(String::from)
-                            .collect(),
-                        rpath: object
-                            .rpaths
-                            .iter()
-                            .flat_map(|v| v.split(':'))
-                            .map(|v| {
-                                if v.contains("$ORIGIN") {
-                                    PathBuf::from(v.replace(
-                                        "$ORIGIN",
-                                        path.as_ref().parent().unwrap().to_str().unwrap(),
-                                    ))
-                                } else {
-                                    PathBuf::from(v)
+                        Ok(Resource::Elf(ElfMetadata {
+                            required_libraries: object
+                                .libraries
+                                .into_iter()
+                                .map(String::from)
+                                .collect(),
+                            rpath: object
+                                .rpaths
+                                .iter()
+                                .flat_map(|v| v.split(':'))
+                                .map(|v| {
+                                    if v.contains("$ORIGIN") {
+                                        PathBuf::from(v.replace(
+                                            "$ORIGIN",
+                                            path.as_ref().parent().unwrap().to_str().unwrap(),
+                                        ))
+                                    } else {
+                                        PathBuf::from(v)
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                            runpath: object
+                                .runpaths
+                                .iter()
+                                .flat_map(|v| v.split(':'))
+                                .map(|v| {
+                                    if v.contains("$ORIGIN") {
+                                        PathBuf::from(v.replace(
+                                            "$ORIGIN",
+                                            path.as_ref().parent().unwrap().to_str().unwrap(),
+                                        ))
+                                    } else {
+                                        PathBuf::from(v)
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                            interpreter: object.interpreter.map(PathBuf::from),
+                            elf_type,
+                            is_executable,
+                        }))
+                    }
+                    Object::Mach(macho) => {
+                        let mut metadata = MachOMetadata { archs: Vec::new() };
+                        match macho {
+                            Mach::Fat(macho) => {
+                                for index in (0..macho.narches) {
+                                    match macho.get(index)? {
+                                        SingleArch::MachO(macho) => {
+                                            metadata.archs.push(SingleArchMachOMetadata {
+                                                arch: (
+                                                    macho.header.cputype,
+                                                    macho.header.cpusubtype,
+                                                ),
+                                                name: macho.name.map(String::from),
+                                                required_libraries: macho
+                                                    .libs
+                                                    .into_iter()
+                                                    .map(String::from)
+                                                    .collect(),
+                                                rpath: macho
+                                                    .rpaths
+                                                    .into_iter()
+                                                    .map(PathBuf::from)
+                                                    .collect(),
+                                                file_type: MachOType::from(macho.header.filetype),
+                                            });
+                                        }
+                                        SingleArch::Archive(archive) => {}
+                                    }
                                 }
-                            })
-                            .collect::<Vec<_>>(),
-                        runpath: object
-                            .runpaths
-                            .iter()
-                            .flat_map(|v| v.split(':'))
-                            .map(|v| {
-                                if v.contains("$ORIGIN") {
-                                    PathBuf::from(v.replace(
-                                        "$ORIGIN",
-                                        path.as_ref().parent().unwrap().to_str().unwrap(),
-                                    ))
-                                } else {
-                                    PathBuf::from(v)
-                                }
-                            })
-                            .collect::<Vec<_>>(),
-                        interpreter: object.interpreter.map(PathBuf::from),
-                        elf_type,
-                        is_executable,
-                    }))
-                } else {
-                    Err(eyre!("Unexpected binary type"))
+                            }
+                            Mach::Binary(macho) => {
+                                metadata.archs.push(SingleArchMachOMetadata {
+                                    arch: (macho.header.cputype, macho.header.cpusubtype),
+                                    name: macho.name.map(String::from),
+                                    required_libraries: macho
+                                        .libs
+                                        .into_iter()
+                                        .map(String::from)
+                                        .collect(),
+                                    rpath: macho.rpaths.into_iter().map(PathBuf::from).collect(),
+                                    file_type: MachOType::from(macho.header.filetype),
+                                });
+                            }
+                        }
+                        Ok(Resource::MachO(metadata))
+                    }
+                    _ => Err(eyre!("Unexpected binary type")),
                 }
             }
-            _ => Err(eyre!("Unexpected resource type")),
+            _ => {
+                unreachable!()
+            }
         }
     }
 }

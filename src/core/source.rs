@@ -161,7 +161,7 @@ impl SourceContext {
                     todo!()
                 }
             }
-            FileKind::Elf | FileKind::Script | FileKind::Other => {
+            FileKind::Elf | FileKind::MachBinary | FileKind::UnixArchive | FileKind::Script | FileKind::Other => {
                 format = (file_type, None);
                 licenses = BTreeSet::default();
             }

@@ -28,6 +28,8 @@ pub(crate) enum FileKind {
     Compress,
     Zstd,
     Elf,
+    MachBinary,
+    UnixArchive,
     Script,
     Other,
 }
@@ -43,6 +45,8 @@ impl From<&str> for FileKind {
             "application/x-xz" => FileKind::Xz,
             "application/zstd" => FileKind::Zstd,
             "application/x-executable" => FileKind::Elf,
+            "application/x-mach-binary" => FileKind::MachBinary,
+            "application/x-unix-archive" => FileKind::UnixArchive,
             "script" => FileKind::Script,
             _ => FileKind::Other,
         }
