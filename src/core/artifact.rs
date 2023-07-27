@@ -946,8 +946,16 @@ impl ArtifactContext {
                                 }
                             })
                         }
-                        RawArtifactItem::Resource(path, file_mode, kind, data) => {
-                            Ok(match Resource::from_data(&path, file_mode, kind, data)? {
+                        RawArtifactItem::Resource(path, file_mode, kind, data) => Ok(
+                            match Resource::from_data(&path, file_mode, kind, data).with_context(
+                                || {
+                                    format!(
+                                        "Failed to read {} detected as {:?} resource",
+                                        path.display(),
+                                        kind
+                                    )
+                                },
+                            )? {
                                 Resource::Elf(metadata) => {
                                     vec![IndexedArtifactItem::Elf((path, metadata))]
                                 }
@@ -957,8 +965,11 @@ impl ArtifactContext {
                                 Resource::MachO(metadata) => {
                                     vec![IndexedArtifactItem::MachO((path, metadata))]
                                 }
-                            })
-                        }
+                                _ => {
+                                    vec![]
+                                }
+                            },
+                        ),
                     }
                 } else {
                     Ok(vec![])
@@ -1376,6 +1387,7 @@ pub(crate) enum Resource {
     Elf(ElfMetadata),
     MachO(MachOMetadata),
     Script(ScriptMetadata),
+    JavaClass,
 }
 
 impl Resource {
@@ -1479,8 +1491,8 @@ impl Resource {
                         match macho {
                             Mach::Fat(macho) => {
                                 for index in (0..macho.narches) {
-                                    match macho.get(index)? {
-                                        SingleArch::MachO(macho) => {
+                                    match macho.get(index) {
+                                        Ok(SingleArch::MachO(macho)) => {
                                             metadata.archs.push(SingleArchMachOMetadata {
                                                 arch: (
                                                     macho.header.cputype,
@@ -1500,7 +1512,14 @@ impl Resource {
                                                 file_type: MachOType::from(macho.header.filetype),
                                             });
                                         }
-                                        SingleArch::Archive(archive) => {}
+                                        Ok(SingleArch::Archive(archive)) => {}
+                                        Err(goblin::error::Error::Malformed(_)) => {
+                                            // MachBinaries and JavaClasses unfortunately share the same magic bytes. We can only know for sure
+                                            // by attempting to parse the object once
+                                            // https://stackoverflow.com/questions/73546728/magic-value-collision-between-macho-fat-binaries-and-java-class-files
+                                            return Ok(Resource::JavaClass);
+                                        }
+                                        Err(err) => return Err(eyre!(err)),
                                     }
                                 }
                             }
