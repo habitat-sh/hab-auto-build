@@ -5,10 +5,13 @@ building and testing of large number of inter-related plan files.
 
 ## Installation
 
-Check out this repository. Then use cargo to build and install the `hab-auto-build` binary.
+Check out this repository. Then use cargo to build and install a static `hab-auto-build` binary.
 
 ```bash
-# Inside the hab-auto-build codebase
+# Asks the rust compiler to statically link in the C Runtime
+export RUSTFLAGS='-C target-feature=+crt-static'
+# Explicitly sets the build target, this is required for the C Runtime static linking to work correctly
+export CARGO_BUILD_TARGET=$(rustc -vV | grep host | sed 's|host: ||')
 cargo install --path .
 ```
 
