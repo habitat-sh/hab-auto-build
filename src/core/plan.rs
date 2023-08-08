@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc::Sender,
+    sync::mpsc::Sender, time::Instant,
 };
 
 use chrono::{DateTime, Utc};
@@ -19,7 +19,7 @@ use lazy_static::lazy_static;
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::{
     check::PlanContextConfig,
@@ -229,6 +229,7 @@ impl PlanContext {
         plan_path: &PlanFilePath,
         target: PackageTarget,
     ) -> Result<PlanContext> {
+        let start = Instant::now();
         let mut child =  Command::new("bash")
             .arg("-s")
             .arg("-")
@@ -319,6 +320,7 @@ impl PlanContext {
             };
             let latest_artifact = artifact_cache.latest_plan_minimal_artifact(&plan_ctx.id);
             plan_ctx.determine_changes(connection, modification_index, latest_artifact.as_ref())?;
+            trace!("Read plan context {} from disk in {}s", plan_ctx.context_path.as_ref().display(), start.elapsed().as_secs_f32());
             Ok(plan_ctx)
         } else {
             Err(eyre!(

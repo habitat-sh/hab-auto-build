@@ -55,7 +55,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                 ) => {
                     info!(target: "user-log", "Downloaded sources for {} from {} in {:.3}s", plan_ctx.id, source.url, download_duration.num_milliseconds() as f32 / 1000.0f32);
                     if args.check_source {
-                        output_violations(&source_violations, &[], "", false, false)?;
+                        output_violations(Some(plan_ctx.plan_path.plan_config_path()), &source_violations, &[], "", false, false)?;
                     }
                 }
                 DownloadStatus::AlreadyDownloaded(
@@ -66,7 +66,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                 ) => {
                     info!(target: "user-log", "Found existing sources for {} from {}", plan_ctx.id, source.url);
                     if args.check_source {
-                        output_violations(&source_violations, &[], "", false, false)?;
+                        output_violations(Some(plan_ctx.plan_path.plan_config_path()), &source_violations, &[], "", false, false)?;
                     }
                 }
                 DownloadStatus::MissingSource(plan_ctx) => {

@@ -1,7 +1,11 @@
 use clap::Args;
 use color_eyre::eyre::{eyre, Context, Result};
 use owo_colors::OwoColorize;
-use std::{env, fmt::Write, path::PathBuf};
+use std::{
+    env,
+    fmt::Write,
+    path::{Path, PathBuf}, time::Instant,
+};
 use tracing::{error, info};
 
 use crate::{
@@ -47,12 +51,18 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         );
         return Ok(());
     }
-    for package_index in package_indices {
-        let package = run_context.dep(package_index);
-        match run_context.package_check(package_index) {
+    let start = Instant::now();
+    for package_index in package_indices.iter() {
+        let package = run_context.dep(*package_index);
+        match run_context.package_check(*package_index) {
             Ok(check_status) => match check_status {
-                PlanCheckStatus::CheckSucceeded(source_violations, artifact_violations) => {
+                PlanCheckStatus::CheckSucceeded(
+                    plan_config_path,
+                    source_violations,
+                    artifact_violations,
+                ) => {
                     output_violations(
+                        plan_config_path,
                         &source_violations,
                         &artifact_violations,
                         format!("{:?}", package).as_str(),
@@ -69,10 +79,12 @@ pub(crate) fn execute(args: Params) -> Result<()> {
             }
         };
     }
+    info!(target: "user-log", "Checked {} packages in {}s", package_indices.len().blue(), start.elapsed().as_secs_f32().blue());
     Ok(())
 }
 
 pub(crate) fn output_violations(
+    plan_config_path: Option<PathBuf>,
     source_violations: &[LeveledSourceCheckViolation],
     artifact_violations: &[LeveledArtifactCheckViolation],
     package: &str,
@@ -129,17 +141,25 @@ pub(crate) fn output_violations(
         info!(target: "user-ui", "{}", header);
     }
     if !summary {
+        let mut show_config_path = false;
         for violation in source_violations {
             if violation.level == ViolationLevel::Off {
                 continue;
             }
+            show_config_path = true;
             info!(target: "user-ui", "     {}", violation);
         }
         for violation in artifact_violations {
             if violation.level == ViolationLevel::Off {
                 continue;
             }
+            show_config_path = true;
             info!(target: "user-ui", "     {}", violation);
+        }
+        if show_config_path {
+            if let Some(plan_config_path) = plan_config_path {
+                info!(target: "user-ui", "       You can configure check rules for this plan in {}", plan_config_path.display().blue());
+            }
         }
     }
     Ok(())

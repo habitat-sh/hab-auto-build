@@ -101,8 +101,13 @@ pub(crate) fn execute(args: Params) -> Result<()> {
             }
             match run_context.package_check(step.index) {
                 Ok(check_status) => match check_status {
-                    PlanCheckStatus::CheckSucceeded(source_violations, artifact_violations) => {
+                    PlanCheckStatus::CheckSucceeded(
+                        plan_config_path,
+                        source_violations,
+                        artifact_violations,
+                    ) => {
                         check::output_violations(
+                            plan_config_path,
                             &source_violations,
                             &artifact_violations,
                             "",
@@ -204,6 +209,11 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                         _ => {}
                     };
                     output_violations(
+                        if !all_checks_passed {
+                            Some(step.plan_ctx.plan_path.plan_config_path())
+                        } else {
+                            None
+                        },
                         &source_violations,
                         &[],
                         &step.plan_ctx.id.to_string(),
@@ -229,6 +239,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
             match run_context.build_step_execute(&step) {
                 Ok(build_result) => {
                     output_violations(
+                        Some(step.plan_ctx.plan_path.plan_config_path()),
                         &[],
                         &build_result.artifact_violations,
                         &step.plan_ctx.id.to_string(),
@@ -281,6 +292,10 @@ pub(crate) fn execute(args: Params) -> Result<()> {
 }
 
 fn output_plain(build_plan: BuildPlan) -> Result<()> {
+    if build_plan.build_steps.is_empty() {
+        info!(target: "user-log", "{}", "All plans built");
+        return Ok(());
+    }
     if !build_plan.check_steps.is_empty() {
         info!(target: "user-ui", "{}", "Dependencies to Check:");
         for (index, step) in build_plan.check_steps.iter().enumerate() {

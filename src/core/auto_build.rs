@@ -270,6 +270,7 @@ pub(crate) enum GitSyncError {
 
 pub(crate) enum PlanCheckStatus {
     CheckSucceeded(
+        Option<PathBuf>,
         Vec<LeveledSourceCheckViolation>,
         Vec<LeveledArtifactCheckViolation>,
     ),
@@ -1219,17 +1220,20 @@ impl AutoBuildContext {
 
     pub fn package_check(&self, package_index: NodeIndex) -> Result<PlanCheckStatus> {
         let mut artifact_cache = self.artifact_cache.write().unwrap();
-        let (plan_config, artifact) = {
+        let (plan_config_path, plan_config, artifact) = {
             match &self.dep_graph.build_graph[package_index] {
                 Dependency::ResolvedDep(ident) => (
+                    None,
                     PlanContextConfig::default(),
                     artifact_cache.artifact(ident)?,
                 ),
                 Dependency::RemoteDep(resolved_dep_ident) => (
+                    None,
                     PlanContextConfig::default(),
                     artifact_cache.latest_artifact(resolved_dep_ident)?,
                 ),
                 Dependency::LocalPlan(plan_ctx) => (
+                    Some(plan_ctx.plan_path.plan_config_path()),
                     plan_ctx.config(),
                     artifact_cache.latest_plan_artifact(&plan_ctx.id)?,
                 ),
@@ -1261,6 +1265,7 @@ impl AutoBuildContext {
             None
         };
         Ok(PlanCheckStatus::CheckSucceeded(
+            plan_config_path,
             source_violations.unwrap_or_default(),
             artifact_violations.unwrap_or_default(),
         ))
