@@ -933,7 +933,7 @@ impl ArtifactCheck for ElfCheck {
                     interpreter_name = Some(file_name.to_string());
                     if let Some(interpreter_dep) =
                         interpreter_path.package_ident(artifact_context.target)
-                    {
+                    {                        
                         if let Some(interpreter_artifact_ctx) = tdep_artifacts.get(&interpreter_dep)
                         {
                             if interpreter_artifact_ctx
@@ -994,6 +994,8 @@ impl ArtifactCheck for ElfCheck {
                             } else {
                                 used_deps.insert(interpreter_dep);
                             }
+                        } else if interpreter_dep == artifact_context.id {
+                            debug!("Interpreter belongs to the same package");
                         } else if !missing_elf_interpreter_dependency_options
                             .ignored_files
                             .is_match(path.relative_package_path().unwrap())
