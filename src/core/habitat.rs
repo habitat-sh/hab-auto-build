@@ -320,7 +320,7 @@ pub(crate) fn native_package_build(
         .plan_ctx
         .context_path
         .as_ref()
-        .strip_prefix(&build_step.repo_ctx.path)
+        .strip_prefix(&build_step.plan_ctx.repo.path)
         .unwrap();
 
     let mut cmd;
@@ -361,7 +361,7 @@ pub(crate) fn native_package_build(
             .arg("-v")
             .arg(format!(
                 "{}:/src",
-                build_step.repo_ctx.path.as_ref().display()
+                build_step.plan_ctx.repo.path.as_ref().display()
             ));
         if let Some(source) = &build_step.plan_ctx.source {
             let source_cache_folder = HabitatRootPath::default().source_cache();
@@ -410,7 +410,7 @@ pub(crate) fn native_package_build(
             .arg(docker_image)
             .arg("build")
             .arg(relative_plan_context)
-            .cwd(build_step.repo_ctx.path.as_ref())
+            .cwd(build_step.plan_ctx.repo.path.as_ref())
             .stdin(Redirection::None)
             .stdout(Redirection::File(build_log))
             .stderr(Redirection::Merge);
@@ -443,7 +443,7 @@ pub(crate) fn native_package_build(
                 build_step.plan_ctx.id.as_ref().origin.to_string(),
             )
             .env("BUILD_PKG_TARGET", PackageTarget::default().to_string())
-            .cwd(build_step.repo_ctx.path.as_ref())
+            .cwd(build_step.plan_ctx.repo.path.as_ref())
             .stdin(NullFile)
             .stdout(Redirection::File(build_log))
             .stderr(Redirection::Merge);
@@ -721,14 +721,14 @@ pub(crate) fn bootstrap_package_build(
         .collect::<Vec<String>>()
         .join(",");
     let relative_plan_context =
-        if build_step.plan_ctx.context_path.as_ref() == build_step.repo_ctx.path.as_ref() {
+        if build_step.plan_ctx.context_path.as_ref() == build_step.plan_ctx.repo.path.as_ref() {
             PathBuf::from(".")
         } else {
             build_step
                 .plan_ctx
                 .context_path
                 .as_ref()
-                .strip_prefix(&build_step.repo_ctx.path)
+                .strip_prefix(&build_step.plan_ctx.repo.path)
                 .unwrap()
                 .to_path_buf()
         };
@@ -764,7 +764,7 @@ pub(crate) fn bootstrap_package_build(
         .arg(studio_root.as_ref())
         .arg("rm")
         .env("HAB_LICENSE", "accept-no-persist")
-        .cwd(build_step.repo_ctx.path.as_ref())
+        .cwd(build_step.plan_ctx.repo.path.as_ref())
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
         .stderr(Redirection::Merge)
@@ -822,7 +822,7 @@ pub(crate) fn bootstrap_package_build(
         .env("HAB_STUDIO_SECRET_STUDIO_ENTER", "1")
         .env("HAB_STUDIO_SECRET_HAB_OUTPUT_PATH", "/output")
         .env("HAB_STUDIO_SECRET_NO_INSTALL_DEPS", "1")
-        .cwd(build_step.repo_ctx.path.as_ref())
+        .cwd(build_step.plan_ctx.repo.path.as_ref())
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
         .stderr(Redirection::Merge);
@@ -1053,14 +1053,14 @@ pub(crate) fn standard_package_build(
         .collect::<Vec<String>>()
         .join(",");
     let relative_plan_context =
-        if build_step.plan_ctx.context_path.as_ref() == build_step.repo_ctx.path.as_ref() {
+        if build_step.plan_ctx.context_path.as_ref() == build_step.plan_ctx.repo.path.as_ref() {
             PathBuf::from(".")
         } else {
             build_step
                 .plan_ctx
                 .context_path
                 .as_ref()
-                .strip_prefix(&build_step.repo_ctx.path)
+                .strip_prefix(&build_step.plan_ctx.repo.path)
                 .unwrap()
                 .to_path_buf()
         };
@@ -1096,7 +1096,7 @@ pub(crate) fn standard_package_build(
         .arg(studio_root.as_ref())
         .arg("rm")
         .env("HAB_LICENSE", "accept-no-persist")
-        .cwd(build_step.repo_ctx.path.as_ref())
+        .cwd(build_step.plan_ctx.repo.path.as_ref())
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
         .stderr(Redirection::Merge);
@@ -1152,7 +1152,7 @@ pub(crate) fn standard_package_build(
         .env("HAB_STUDIO_SECRET_STUDIO_ENTER", "1")
         .env("HAB_STUDIO_SECRET_HAB_OUTPUT_PATH", "/output")
         .env("HAB_STUDIO_SECRET_NO_INSTALL_DEPS", "1")
-        .cwd(build_step.repo_ctx.path.as_ref())
+        .cwd(build_step.plan_ctx.repo.path.as_ref())
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
         .stderr(Redirection::Merge);

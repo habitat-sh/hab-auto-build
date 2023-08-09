@@ -4,7 +4,8 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc::Sender, time::Instant,
+    sync::{mpsc::Sender, Arc},
+    time::Instant,
 };
 
 use chrono::{DateTime, Utc};
@@ -27,9 +28,9 @@ use crate::{
 };
 
 use super::{
-    ArtifactCache, ArtifactContext, Metadata, MinimalArtifactContext, PackageBuildIdent,
+    ArtifactCache, ArtifactContext, Git, Metadata, MinimalArtifactContext, PackageBuildIdent,
     PackageBuildVersion, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
-    PackageResolvedDepIdent, PackageSource, PackageTarget, RepoContext, RepoContextID,
+    PackageResolvedDepIdent, PackageSource, PackageTarget, RepoContext, RepoContextID, RepoSource,
 };
 
 lazy_static! {
@@ -164,10 +165,11 @@ impl Display for PlanContextID {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct PlanContext {
     pub id: PlanContextID,
-    pub repo_id: RepoContextID,
+    #[serde(skip)]
+    pub repo: Arc<RepoContext>,
     pub context_path: PlanContextPath,
     pub target_context_path: PlanTargetContextPath,
     pub target_context_last_modified_at: DateTime<Utc>,
@@ -222,7 +224,7 @@ impl PlanContext {
     pub fn read_from_disk(
         connection: Option<&mut SqliteConnection>,
         modification_index: Option<&ModificationIndex>,
-        repo_ctx: &RepoContext,
+        repo: Arc<RepoContext>,
         artifact_cache: &ArtifactCache,
         plan_ctx_path: &PlanContextPath,
         plan_target_ctx_path: &PlanTargetContextPath,
@@ -285,7 +287,7 @@ impl PlanContext {
                     }) {
                     Ok(plan_rules) => Some(plan_rules),
                     Err(err) => {
-                        info!(target: "user-ui", "{} Failed to read plan config from {}: {:?}", "error:".bold().red(), plan_config_path.strip_prefix(repo_ctx.path.as_ref()).unwrap().display(), err);
+                        info!(target: "user-ui", "{} Failed to read plan config from {}: {:?}", "error:".bold().red(), plan_config_path.strip_prefix(repo.path.as_ref()).unwrap().display(), err);
                         None
                     }
                 }
@@ -295,8 +297,8 @@ impl PlanContext {
 
             let mut plan_ctx = PlanContext {
                 id,
-                repo_id: repo_ctx.id.clone(),
-                is_native: repo_ctx.is_native_plan(&plan_ctx_path),
+                repo: repo.clone(),
+                is_native: repo.is_native_plan(&plan_ctx_path),
                 context_path: plan_ctx_path.clone(),
                 target_context_last_modified_at: plan_target_ctx_path.last_modifed_at()?,
                 target_context_path: plan_target_ctx_path.clone(),
@@ -320,7 +322,11 @@ impl PlanContext {
             };
             let latest_artifact = artifact_cache.latest_plan_minimal_artifact(&plan_ctx.id);
             plan_ctx.determine_changes(connection, modification_index, latest_artifact.as_ref())?;
-            trace!("Read plan context {} from disk in {}s", plan_ctx.context_path.as_ref().display(), start.elapsed().as_secs_f32());
+            trace!(
+                "Read plan context {} from disk in {}s",
+                plan_ctx.context_path.as_ref().display(),
+                start.elapsed().as_secs_f32()
+            );
             Ok(plan_ctx)
         } else {
             Err(eyre!(
@@ -339,6 +345,14 @@ impl PlanContext {
         modification_index: Option<&ModificationIndex>,
         artifact_ctx: Option<&MinimalArtifactContext>,
     ) -> Result<()> {
+        debug!(
+            "Determining changes to plan {}",
+            self.id
+        );
+        if matches!(self.repo.source, RepoSource::Git(_)) {
+            debug!("No changes to determine for plan as it is a git checkout");
+            return Ok(());
+        }
         let plan_ctx_walker = WalkBuilder::new(self.context_path.as_ref())
             .standard_filters(false)
             .sort_by_file_path(|a, b| a.cmp(b))
@@ -407,23 +421,8 @@ impl PlanContext {
                                 } else {
                                     real_last_modified_at
                                 };
-                            let git_modified_at: Option<DateTime<Utc>> = {
-                                let child = std::process::Command::new("git")
-                                    .arg("log")
-                                    .arg("-1")
-                                    .arg("--pretty=%ci")
-                                    .arg(entry.path())
-                                    .stdin(Stdio::null())
-                                    .stdout(Stdio::piped())
-                                    .stderr(Stdio::piped())
-                                    .current_dir(self.context_path.as_ref())
-                                    .spawn()?;
-                                let output = child.wait_with_output()?;
-                                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                                DateTime::parse_from_str(stdout.trim(), "%Y-%m-%d %H:%M:%S %z")
-                                    .ok()
-                                    .map(|value| DateTime::from_utc(value.naive_utc(), Utc))
-                            };
+                            let git_modified_at: Option<DateTime<Utc>> =
+                                Git::modification_time(&self.context_path, entry.path())?;
 
                             if let Some(artifact_ctx) = artifact_ctx {
                                 if modified_at > artifact_ctx.created_at {
@@ -474,38 +473,9 @@ impl PlanContext {
             match entry {
                 Ok(entry) => {
                     let disk_modified_at = entry.path().last_modifed_at()?;
-                    let is_locally_modified = {
-                        let mut child = std::process::Command::new("git")
-                            .arg("diff")
-                            .arg("--quiet")
-                            .arg("--exit-code")
-                            .arg(entry.path())
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .current_dir(self.context_path.as_ref())
-                            .spawn()?;
-                        let exit_status = child.wait()?;
-                        !exit_status.success()
-                    };
-                    if !is_locally_modified {
-                        let git_modified_at: Option<DateTime<Utc>> = {
-                            let child = std::process::Command::new("git")
-                                .arg("log")
-                                .arg("-1")
-                                .arg("--pretty=%ci")
-                                .arg(entry.path())
-                                .stdin(Stdio::null())
-                                .stdout(Stdio::piped())
-                                .stderr(Stdio::piped())
-                                .current_dir(self.context_path.as_ref())
-                                .spawn()?;
-                            let output = child.wait_with_output()?;
-                            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                            DateTime::parse_from_str(stdout.trim(), "%Y-%m-%d %H:%M:%S %z")
-                                .ok()
-                                .map(|value| DateTime::from_utc(value.naive_utc(), Utc))
-                        };
+                    if !Git::is_locally_modified(&self.context_path, entry.path())? {
+                        let git_modified_at: Option<DateTime<Utc>> =
+                            Git::modification_time(&self.context_path, entry.path())?;
                         if let Some(git_modified_at) = git_modified_at {
                             if git_modified_at != disk_modified_at {
                                 if !is_dry_run {
@@ -536,7 +506,7 @@ impl PlanContext {
 }
 
 pub(crate) struct PlanScanner<'a> {
-    repos: &'a HashMap<RepoContextID, RepoContext>,
+    repo: Arc<RepoContext>,
     modification_index: &'a ModificationIndex,
     artifact_cache: &'a ArtifactCache,
     sender: Sender<PlanContext>,
@@ -552,16 +522,18 @@ impl<'a> ParallelVisitor for PlanScanner<'a> {
             if !base_dir.is_dir() {
                 return WalkState::Continue;
             }
+            if let Some(".hab-auto-build") = base_dir.file_name().map_or(None, |p| p.to_str()) {
+                debug!(
+                    "Skipping .hab-auto-build directory {}",
+                    entry.path().display()
+                );
+                return WalkState::Continue;
+            }
             let mut is_plan_ctx = false;
             for (plan_rel_path, plan_target) in RELATIVE_PLAN_FILE_PATHS.iter() {
                 let plan_path = base_dir.join(plan_rel_path);
                 if plan_path.is_file() {
                     is_plan_ctx = true;
-                    let (_, repo_ctx) = self
-                        .repos
-                        .iter()
-                        .find(|(_, repo_ctx)| plan_path.starts_with(repo_ctx.path.as_ref()))
-                        .expect("Plan can only be within a repo folder");
                     let plan_target_ctx_path = PlanTargetContextPath(
                         plan_path
                             .parent()
@@ -575,13 +547,13 @@ impl<'a> ParallelVisitor for PlanScanner<'a> {
                         plan_path.as_ref().display(),
                         plan_ctx_path.as_ref().display()
                     );
-                    if repo_ctx.is_ignored_plan(&plan_ctx_path) {
+                    if self.repo.is_ignored_plan(&plan_ctx_path) {
                         continue;
                     }
                     match PlanContext::read_from_disk(
                         None,
                         Some(self.modification_index),
-                        repo_ctx,
+                        self.repo.clone(),
                         self.artifact_cache,
                         &plan_ctx_path,
                         &plan_target_ctx_path,
@@ -594,7 +566,7 @@ impl<'a> ParallelVisitor for PlanScanner<'a> {
                                 .expect("Failed to send PlanContext to parent thread");
                         }
                         Err(err) => {
-                            info!(target: "user-ui", "{} Failed to extract plan metadata from {}: {:?}", "error:".bold().red(), plan_path.as_ref().strip_prefix(repo_ctx.path.as_ref()).unwrap().display(), err);
+                            info!(target: "user-ui", "{} Failed to extract plan metadata from {}: {:?}", "error:".bold().red(), plan_path.as_ref().strip_prefix(self.repo.path.as_ref()).unwrap().display(), err);
                         }
                     };
                 }
@@ -611,7 +583,7 @@ impl<'a> ParallelVisitor for PlanScanner<'a> {
 }
 
 pub(crate) struct PlanScannerBuilder<'a> {
-    repos: &'a HashMap<RepoContextID, RepoContext>,
+    repo: Arc<RepoContext>,
     modification_index: &'a ModificationIndex,
     artifact_cache: &'a ArtifactCache,
     sender: Sender<PlanContext>,
@@ -623,7 +595,7 @@ where
 {
     fn build(&mut self) -> Box<dyn ignore::ParallelVisitor + 's> {
         Box::new(PlanScanner {
-            repos: self.repos,
+            repo: self.repo.clone(),
             modification_index: self.modification_index,
             artifact_cache: self.artifact_cache,
             sender: self.sender.clone(),
@@ -633,13 +605,13 @@ where
 
 impl<'a> PlanScannerBuilder<'a> {
     pub fn new(
-        repos: &'a HashMap<RepoContextID, RepoContext>,
+        repo: Arc<RepoContext>,
         modification_index: &'a ModificationIndex,
         artifact_cache: &'a ArtifactCache,
         sender: Sender<PlanContext>,
     ) -> PlanScannerBuilder<'a> {
         PlanScannerBuilder {
-            repos,
+            repo,
             modification_index,
             artifact_cache,
             sender,

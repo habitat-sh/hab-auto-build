@@ -79,7 +79,7 @@ type PackageVersionList = HashMap<
     >,
 >;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Clone)]
 #[serde(tag = "dependency_type", content = "data")]
 pub(crate) enum Dependency {
     #[serde(rename = "resolved_dependency")]
@@ -501,7 +501,7 @@ impl DepGraph {
                                             DependencyType::Studio,
                                         );
                                     }
-                                    // Use the bootstrap studio if there is a local / resolved bootstrap 
+                                    // Use the bootstrap studio if there is a local / resolved bootstrap
                                     // studio plan and no local / resolved standard studio plan
                                     (Dependency::ResolvedDep(_), Dependency::RemoteDep(_))
                                     | (Dependency::LocalPlan(_), Dependency::RemoteDep(_)) => {
@@ -625,7 +625,8 @@ impl DepGraph {
             let repo_id = self.build_graph[node_index]
                 .plan_ctx()
                 .unwrap()
-                .repo_id
+                .repo
+                .id
                 .clone();
             changed_deps_by_repo
                 .entry(repo_id)

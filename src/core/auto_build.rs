@@ -42,7 +42,7 @@ use super::{
     LazyArtifactContext, PackageBuildVersion, PackageDepGlob, PackageDepIdent, PackageIdent,
     PackageName, PackageOrigin, PackageSha256Sum, PackageSource, PackageTarget, PlanContext,
     PlanContextID, PlanContextPathGitSyncStatus, PlanScannerBuilder, RepoConfig, RepoContext,
-    RepoContextID,
+    RepoContextID, RepoSource,
 };
 
 lazy_static! {
@@ -158,7 +158,7 @@ pub(crate) struct AutoBuildContext {
     path: AutoBuildContextPath,
     studios: BuildStudioConfig,
     store: Store,
-    repos: HashMap<RepoContextID, RepoContext>,
+    repos: HashMap<RepoContextID, Arc<RepoContext>>,
     dep_graph: DepGraph,
     artifact_cache: Arc<RwLock<ArtifactCache>>,
 }
@@ -200,7 +200,6 @@ pub(crate) struct CheckStep<'a> {
 #[derive(Debug)]
 pub(crate) struct BuildStep<'a> {
     pub index: NodeIndex,
-    pub repo_ctx: &'a RepoContext,
     pub plan_ctx: &'a PlanContext,
     pub studio: BuildStepStudio,
     pub allow_remote: bool,
@@ -316,7 +315,6 @@ pub(crate) enum DownloadError {
 #[derive(Debug, Serialize)]
 pub(crate) struct DependencyAnalysis<'a> {
     pub dep_ctx: &'a Dependency,
-    pub repo_ctx: Option<&'a RepoContext>,
     pub plan_ctx: Option<&'a PlanContext>,
     pub studio_dep: Option<Option<&'a Dependency>>,
     pub deps: Option<Vec<&'a Dependency>>,
@@ -350,11 +348,6 @@ impl AutoBuildContext {
                 .to_path_buf(),
         );
 
-        for repo_config in config.repos.iter() {
-            let repo_ctx = RepoContext::new(repo_config, &auto_build_ctx_path)?;
-            repos.insert(repo_ctx.id.clone(), repo_ctx);
-        }
-
         let store_path = config.store.as_ref().unwrap_or(&DEFAULT_STORE_PATH);
         let store_path = if store_path.is_absolute() {
             store_path.clone()
@@ -368,60 +361,47 @@ impl AutoBuildContext {
             )
         })?;
 
+        for repo_config in config.repos.iter() {
+            let repo_ctx = Arc::new(RepoContext::new(repo_config, &store, &auto_build_ctx_path)?);
+            repos.insert(repo_ctx.id.clone(), repo_ctx);
+        }
+
         // Scan artifact cache
         let artifact_cache = ArtifactCache::new(ArtifactCachePath::default(), &store)?;
 
-        let mut dir_walk_builder: Option<WalkBuilder> = None;
-        for repo_ctx in repos.values() {
-            if let Some(dir_walk_builder) = dir_walk_builder.as_mut() {
-                dir_walk_builder.add(repo_ctx.path.as_ref());
-            } else {
-                let mut new_walk_builder = WalkBuilder::new(repo_ctx.path.as_ref());
-                new_walk_builder.follow_links(false);
-                dir_walk_builder = Some(new_walk_builder);
-            }
-        }
-
-        let dir_walker = if let Some(dir_walk_builder) = dir_walk_builder {
-            dir_walk_builder.build_parallel()
-        } else {
-            return Err(
-                eyre!("No plan repos were specified in the hab-auto-build configuration")
-                    .with_suggestion(|| {
-                        "You need to specify atleast one repo object under the 'repos' key"
-                    }),
-            );
-        };
         let mut plans: HashMap<PlanContextID, PlanContext> = HashMap::new();
         let modification_index = store.get_connection()?.transaction(|connection| {
             store::files_alternate_modified_at_get_full_index(connection)
         })?;
-        let (sender, receiver) = channel();
-        let mut dir_visitor_builder =
-            PlanScannerBuilder::new(&repos, &modification_index, &artifact_cache, sender);
-        std::thread::scope(|scope| {
-            let walk_handle = scope.spawn(move || dir_walker.visit(&mut dir_visitor_builder));
-            while let Ok(plan_ctx) = receiver.recv() {
-                match plans.get(&plan_ctx.id) {
-                    Some(existing_plan_ctx) => {
-                        return Err(eyre!(
-                        "Found multiple plans for the package '{}' at '{}' and previously at '{}'",
-                        plan_ctx.id,
-                        plan_ctx.plan_path.as_ref().display(),
-                        existing_plan_ctx.plan_path.as_ref().display()
-                    ))
-                    }
-                    None => {
-                        plans.insert(plan_ctx.id.clone(), plan_ctx);
+
+        for repo in repos.values() {
+            let mut dir_walker = WalkBuilder::new(repo.path.as_ref()).follow_links(false).build_parallel();
+            let (sender, receiver) = channel();
+            let mut dir_visitor_builder =
+                PlanScannerBuilder::new(repo.clone(), &modification_index, &artifact_cache, sender);
+            std::thread::scope(|scope| {
+                let walk_handle = scope.spawn(move || dir_walker.visit(&mut dir_visitor_builder));
+                while let Ok(plan_ctx) = receiver.recv() {
+                    match plans.get(&plan_ctx.id) {
+                        Some(existing_plan_ctx) => {
+                            return Err(eyre!(
+                            "Found multiple plans for the package '{}' at '{}' and previously at '{}'",
+                            plan_ctx.id,
+                            plan_ctx.plan_path.as_ref().display(),
+                            existing_plan_ctx.plan_path.as_ref().display()
+                        ))
+                        }
+                        None => {
+                            plans.insert(plan_ctx.id.clone(), plan_ctx);
+                        }
                     }
                 }
-            }
-            walk_handle
-                .join()
-                .expect("Failed to join plan scanning directory walker thread");
-            Ok(())
-        })?;
-
+                walk_handle
+                    .join()
+                    .expect("Failed to join plan scanning directory walker thread");
+                Ok(())
+            })?;
+        }
         info!(
             "Detected {} plans across {} repos in {}s",
             plans.len(),
@@ -472,21 +452,14 @@ impl AutoBuildContext {
         analysis_types: &HashSet<AnalysisType>,
     ) -> Result<DependencyAnalysis<'a>> {
         let dep = &self.dep_graph.build_graph[dep_node_index];
-        let (repo_ctx, plan_ctx) = match dep {
-            Dependency::ResolvedDep(_) => (None, None),
-            Dependency::RemoteDep(_) => (None, None),
-            Dependency::LocalPlan(plan_ctx) => {
-                let repo_ctx = self
-                    .repos
-                    .get(&plan_ctx.repo_id)
-                    .expect("Plan must belong to a repo");
-                (Some(repo_ctx), Some(plan_ctx))
-            }
+        let plan_ctx = match dep {
+            Dependency::ResolvedDep(_) => None,
+            Dependency::RemoteDep(_) => None,
+            Dependency::LocalPlan(plan_ctx) => Some(plan_ctx),
         };
 
         Ok(DependencyAnalysis {
             dep_ctx: &self.dep_graph.build_graph[dep_node_index],
-            repo_ctx,
             plan_ctx,
             deps: analysis_types
                 .get(&AnalysisType::Dependencies)
@@ -929,9 +902,12 @@ impl AutoBuildContext {
             match self.dep_graph.dep_mut(*plan_node_index) {
                 Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
                 Dependency::LocalPlan(ref mut plan_ctx) => {
+                    if matches!(plan_ctx.repo.source, RepoSource::Git(_)) {
+                        continue;
+                    }
                     let sync_results = plan_ctx.sync_changes_with_git(is_dry_run)?;
                     if !sync_results.is_empty() {
-                        results.entry(plan_ctx.repo_id.clone()).or_default().push(
+                        results.entry(plan_ctx.repo.id.clone()).or_default().push(
                             PlanContextGitSyncStatus {
                                 id: plan_ctx.id.clone(),
                                 file_statuses: sync_results,
@@ -1172,10 +1148,6 @@ impl AutoBuildContext {
                         let plan_ctx = self.dep_graph.build_graph[node_index]
                             .plan_ctx()
                             .expect("Dependency must be a plan");
-                        let repo_ctx = self
-                            .repos
-                            .get(&plan_ctx.repo_id)
-                            .expect("Plan must belong to a repo");
                         let build_duration =
                             store::build_time_get(connection, plan_ctx.id.as_ref())?
                                 .map(|value| Duration::seconds(value.duration_in_secs as i64));
@@ -1201,7 +1173,6 @@ impl AutoBuildContext {
                             .collect::<Vec<_>>();
                         Ok(BuildStep {
                             index: node_index,
-                            repo_ctx,
                             plan_ctx,
                             studio,
                             studio_package,

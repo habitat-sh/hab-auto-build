@@ -112,7 +112,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
 
 fn output_plain(dep_analysis_list: Vec<DependencyAnalysis>) -> Result<()> {
     for dep_analysis in dep_analysis_list {
-        if let (Some(repo_ctx), Some(plan_ctx)) = (dep_analysis.repo_ctx, dep_analysis.plan_ctx) {
+        if let (Some(plan_ctx)) = dep_analysis.plan_ctx {
             info!(
                 target: "user-ui",
                 "{}\n{}\n",
@@ -123,7 +123,7 @@ fn output_plain(dep_analysis_list: Vec<DependencyAnalysis>) -> Result<()> {
                 target: "user-ui",
                 "{}\n{}\n",
                 "Repo:".white().bold(),
-                repo_ctx.path.as_ref().display()
+                plan_ctx.repo.path.as_ref().display()
             );
             info!(
                 target: "user-ui",

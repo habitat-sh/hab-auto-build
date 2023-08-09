@@ -918,6 +918,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "url",
  "which",
  "xz2",
  "zstd 0.12.4",
@@ -2748,6 +2749,7 @@ dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
+ "serde",
 ]
 
 [[package]]

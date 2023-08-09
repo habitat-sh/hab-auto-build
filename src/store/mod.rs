@@ -8,8 +8,8 @@ use std::{
 
 use crate::{
     core::{
-        ArtifactContext, Blake3, InnerArtifactContext, PackageBuildIdent, PackageSha256Sum,
-        PackageSource, PlanContextPath, SourceContext,
+        ArtifactContext, Blake3, GitRepo, InnerArtifactContext, PackageBuildIdent,
+        PackageSha256Sum, PackageSource, PlanContextPath, SourceContext,
     },
     store::model::SourceContextRecord,
 };
@@ -134,6 +134,24 @@ impl AsRef<Path> for PackageSourceLicenseStorePath {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct RepoSourceGitDirectoryPath(PathBuf);
+
+impl AsRef<Path> for RepoSourceGitDirectoryPath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct RepoSourceGitWorkTreePath(PathBuf);
+
+impl AsRef<Path> for RepoSourceGitWorkTreePath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Store {
     path: StorePath,
@@ -154,7 +172,6 @@ impl Store {
         // Refer to the `r2d2` documentation for more methods to use
         // when building a connection pool
         let pool = Pool::builder()
-            .max_size(1)
             .test_on_check_out(true)
             .build(manager)?;
         let mut connection = pool.get()?;
@@ -196,7 +213,6 @@ impl Store {
     pub fn package_build_failure_logs_path(&self) -> PackageBuildFailureLogsStorePath {
         PackageBuildFailureLogsStorePath(self.path.as_ref().join("build-failure-logs"))
     }
-
     pub fn package_source_store_path(&self, source: &PackageSource) -> PackageSourceStorePath {
         PackageSourceStorePath(
             self.path
@@ -214,6 +230,24 @@ impl Store {
                 .as_ref()
                 .join("invalid-sources")
                 .join(source.shasum.to_string()),
+        )
+    }
+    pub fn repo_git_directory_path(&self, source: &GitRepo) -> RepoSourceGitDirectoryPath {
+        RepoSourceGitDirectoryPath(
+            self.path.as_ref().join("git-repos").join(
+                Blake3::hash_value(format!("{}", source.url))
+                    .unwrap()
+                    .to_string(),
+            ),
+        )
+    }
+    pub fn repo_git_work_tree_path(&self, source: &GitRepo) -> RepoSourceGitWorkTreePath {
+        RepoSourceGitWorkTreePath(
+            self.path.as_ref().join("git-trees").join(
+                Blake3::hash_value(format!("{}#{}", source.url, source.commit))
+                    .unwrap()
+                    .to_string(),
+            ),
         )
     }
 }

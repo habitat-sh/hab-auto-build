@@ -62,6 +62,7 @@ tokio = "1.28.1"
 mime_guess = "2.0.4"
 filetime = "0.2.21"
 rayon = "1.7.0"
+url = { version = "2", features = ["serde"]}
 # Vendors OpenSSL so we don't have to depend on the system
 native-tls = { version = "0.2", features = ["vendored"] }
 

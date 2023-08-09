@@ -1,20 +1,43 @@
 use color_eyre::eyre::{eyre, Context, Result};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Display,
     path::{Path, PathBuf},
 };
 
-use super::{AutoBuildContextPath, GlobSetExpression, PlanContextPath};
+use crate::store::Store;
+
+use super::{AutoBuildContextPath, Git, GlobSetExpression, PlanContextPath};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RepoConfig {
     pub id: String,
-    pub source: PathBuf,
+    pub source: RepoSource,
     #[serde(default)]
     pub native_packages: GlobSetExpression,
     #[serde(default)]
     pub ignored_packages: GlobSetExpression,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum RepoSource {
+    #[serde(rename = "git")]
+    Git(GitRepo),
+    #[serde(rename = "local")]
+    Local(LocalRepo),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GitRepo {
+    pub url: Url,
+    pub commit: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalRepo {
+    pub path: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Serialize, Deserialize)]
@@ -57,6 +80,7 @@ impl AsRef<Path> for RepoContextPath {
 pub(crate) struct RepoContext {
     pub id: RepoContextID,
     pub path: RepoContextPath,
+    pub source: RepoSource,
     #[serde(skip)]
     pub ignore_globset: GlobSetExpression,
     #[serde(skip)]
@@ -66,18 +90,34 @@ pub(crate) struct RepoContext {
 impl RepoContext {
     pub fn new(
         config: &RepoConfig,
+        store: &Store,
         auto_build_ctx_path: &AutoBuildContextPath,
     ) -> Result<RepoContext> {
+        let path = match &config.source {
+            RepoSource::Git(source_repo) => {
+                // Checkout git repository
+                Git::clone(store, source_repo)?;
+                Git::checkout(store, source_repo)?
+                    .as_ref()
+                    .to_path_buf()
+                    .try_into()?
+            }
+            RepoSource::Local(source_repo) => {
+                if source_repo.path.is_absolute() {
+                    source_repo.path.clone().try_into()?
+                } else {
+                    auto_build_ctx_path
+                        .as_ref()
+                        .join(&source_repo.path)
+                        .try_into()?
+                }
+            }
+        };
+
         Ok(RepoContext {
             id: RepoContextID(config.id.clone()),
-            path: if config.source.is_absolute() {
-                config.source.clone().try_into()?
-            } else {
-                auto_build_ctx_path
-                    .as_ref()
-                    .join(config.source.as_path())
-                    .try_into()?
-            },
+            path,
+            source: config.source.clone(),
             ignore_globset: config.ignored_packages.clone(),
             native_globset: config.native_packages.clone(),
         })
