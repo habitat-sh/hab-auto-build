@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 use clap::Args;
 use tracing::{error, info};
 
-use crate::core::{AddStatus, AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget};
+use crate::core::{AddStatus, AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget, ChangeDetectionMode};
 use color_eyre::eyre::{eyre, Context, Result};
 
 #[derive(Debug, Args)]
@@ -23,7 +23,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     );
     let config = AutoBuildConfig::new(&config_path)?;
 
-    let mut run_context = AutoBuildContext::new(&config, &config_path)
+    let mut run_context = AutoBuildContext::new(&config, &config_path, ChangeDetectionMode::Disk)
         .with_context(|| eyre!("Failed to initialize run"))?;
 
     let package_indices = run_context.glob_deps(&args.packages, PackageTarget::default())?;

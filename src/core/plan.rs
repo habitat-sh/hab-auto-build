@@ -4,7 +4,8 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc::Sender, time::Instant,
+    sync::mpsc::Sender,
+    time::Instant,
 };
 
 use chrono::{DateTime, Utc};
@@ -27,9 +28,10 @@ use crate::{
 };
 
 use super::{
-    ArtifactCache, ArtifactContext, Metadata, MinimalArtifactContext, PackageBuildIdent,
-    PackageBuildVersion, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
-    PackageResolvedDepIdent, PackageSource, PackageTarget, RepoContext, RepoContextID,
+    ArtifactCache, ArtifactContext, ChangeDetectionMode, Metadata, MinimalArtifactContext,
+    PackageBuildIdent, PackageBuildVersion, PackageDepIdent, PackageIdent, PackageName,
+    PackageOrigin, PackageResolvedDepIdent, PackageSource, PackageTarget, RepoContext,
+    RepoContextID,
 };
 
 lazy_static! {
@@ -228,6 +230,7 @@ impl PlanContext {
         plan_target_ctx_path: &PlanTargetContextPath,
         plan_path: &PlanFilePath,
         target: PackageTarget,
+        change_detection_mode: ChangeDetectionMode,
     ) -> Result<PlanContext> {
         let start = Instant::now();
         let mut child =  Command::new("bash")
@@ -319,8 +322,17 @@ impl PlanContext {
                 plan_config,
             };
             let latest_artifact = artifact_cache.latest_plan_minimal_artifact(&plan_ctx.id);
-            plan_ctx.determine_changes(connection, modification_index, latest_artifact.as_ref())?;
-            trace!("Read plan context {} from disk in {}s", plan_ctx.context_path.as_ref().display(), start.elapsed().as_secs_f32());
+            plan_ctx.determine_changes(
+                connection,
+                modification_index,
+                latest_artifact.as_ref(),
+                change_detection_mode,
+            )?;
+            trace!(
+                "Read plan context {} from disk in {}s",
+                plan_ctx.context_path.as_ref().display(),
+                start.elapsed().as_secs_f32()
+            );
             Ok(plan_ctx)
         } else {
             Err(eyre!(
@@ -338,6 +350,7 @@ impl PlanContext {
         mut connection: Option<&mut SqliteConnection>,
         modification_index: Option<&ModificationIndex>,
         artifact_ctx: Option<&MinimalArtifactContext>,
+        change_detection_mode: ChangeDetectionMode,
     ) -> Result<()> {
         let plan_ctx_walker = WalkBuilder::new(self.context_path.as_ref())
             .standard_filters(false)
@@ -407,7 +420,9 @@ impl PlanContext {
                                 } else {
                                     real_last_modified_at
                                 };
-                            let git_modified_at: Option<DateTime<Utc>> = {
+                            let git_modified_at: Option<DateTime<Utc>> = if change_detection_mode
+                                == ChangeDetectionMode::Git
+                            {
                                 let child = std::process::Command::new("git")
                                     .arg("log")
                                     .arg("-1")
@@ -423,6 +438,8 @@ impl PlanContext {
                                 DateTime::parse_from_str(stdout.trim(), "%Y-%m-%d %H:%M:%S %z")
                                     .ok()
                                     .map(|value| DateTime::from_utc(value.naive_utc(), Utc))
+                            } else {
+                                None
                             };
 
                             if let Some(artifact_ctx) = artifact_ctx {
@@ -434,12 +451,18 @@ impl PlanContext {
                                             path: PlanContextFilePath(entry.path().to_path_buf()),
                                         })
                                 }
-                                if let Some(modified_at) = git_modified_at {
-                                    if modified_at > artifact_ctx.created_at {
-                                        self.files_changed_on_git.push(PlanContextFileChangeOnGit {
-                                            last_modified_at: modified_at,
-                                            path: PlanContextFilePath(entry.path().to_path_buf()),
-                                        })
+                                if change_detection_mode == ChangeDetectionMode::Git {
+                                    if let Some(modified_at) = git_modified_at {
+                                        if modified_at > artifact_ctx.created_at {
+                                            self.files_changed_on_git.push(
+                                                PlanContextFileChangeOnGit {
+                                                    last_modified_at: modified_at,
+                                                    path: PlanContextFilePath(
+                                                        entry.path().to_path_buf(),
+                                                    ),
+                                                },
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -539,6 +562,7 @@ pub(crate) struct PlanScanner<'a> {
     repos: &'a HashMap<RepoContextID, RepoContext>,
     modification_index: &'a ModificationIndex,
     artifact_cache: &'a ArtifactCache,
+    change_detection_mode: ChangeDetectionMode,
     sender: Sender<PlanContext>,
 }
 
@@ -587,6 +611,7 @@ impl<'a> ParallelVisitor for PlanScanner<'a> {
                         &plan_target_ctx_path,
                         &plan_path,
                         plan_target.to_owned(),
+                        self.change_detection_mode,
                     ) {
                         Ok(plan_ctx) => {
                             self.sender
@@ -614,6 +639,7 @@ pub(crate) struct PlanScannerBuilder<'a> {
     repos: &'a HashMap<RepoContextID, RepoContext>,
     modification_index: &'a ModificationIndex,
     artifact_cache: &'a ArtifactCache,
+    change_detection_mode: ChangeDetectionMode,
     sender: Sender<PlanContext>,
 }
 
@@ -626,6 +652,7 @@ where
             repos: self.repos,
             modification_index: self.modification_index,
             artifact_cache: self.artifact_cache,
+            change_detection_mode: self.change_detection_mode,
             sender: self.sender.clone(),
         })
     }
@@ -636,12 +663,14 @@ impl<'a> PlanScannerBuilder<'a> {
         repos: &'a HashMap<RepoContextID, RepoContext>,
         modification_index: &'a ModificationIndex,
         artifact_cache: &'a ArtifactCache,
+        change_detection_mode: ChangeDetectionMode,
         sender: Sender<PlanContext>,
     ) -> PlanScannerBuilder<'a> {
         PlanScannerBuilder {
             repos,
             modification_index,
             artifact_cache,
+            change_detection_mode,
             sender,
         }
     }

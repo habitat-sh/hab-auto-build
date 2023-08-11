@@ -43,7 +43,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     );
     let config = AutoBuildConfig::new(&config_path)?;
 
-    let run_context = AutoBuildContext::new(&config, &config_path)
+    let run_context = AutoBuildContext::new(&config, &config_path, args.change_detection_mode)
         .with_context(|| eyre!("Failed to initialize run"))?;
 
     let packages = &args

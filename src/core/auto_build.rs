@@ -336,6 +336,7 @@ impl AutoBuildContext {
     pub fn new(
         config: &AutoBuildConfig,
         config_path: impl AsRef<Path>,
+        change_detection_mode: ChangeDetectionMode,
     ) -> Result<AutoBuildContext> {
         let start = Instant::now();
 
@@ -397,8 +398,13 @@ impl AutoBuildContext {
             store::files_alternate_modified_at_get_full_index(connection)
         })?;
         let (sender, receiver) = channel();
-        let mut dir_visitor_builder =
-            PlanScannerBuilder::new(&repos, &modification_index, &artifact_cache, sender);
+        let mut dir_visitor_builder = PlanScannerBuilder::new(
+            &repos,
+            &modification_index,
+            &artifact_cache,
+            change_detection_mode,
+            sender,
+        );
         std::thread::scope(|scope| {
             let walk_handle = scope.spawn(move || dir_walker.visit(&mut dir_visitor_builder));
             while let Ok(plan_ctx) = receiver.recv() {
@@ -876,6 +882,7 @@ impl AutoBuildContext {
                             Some(connection),
                             None,
                             Some(&latest_plan_artifact),
+                            ChangeDetectionMode::Disk,
                         )?;
                         if plan_ctx.files_changed_on_disk.is_empty() {
                             let alternate_modified_at =
@@ -891,6 +898,7 @@ impl AutoBuildContext {
                                 Some(connection),
                                 None,
                                 Some(&latest_plan_artifact),
+                                ChangeDetectionMode::Disk,
                             )?;
                         }
                         debug!(
@@ -1004,6 +1012,7 @@ impl AutoBuildContext {
                             artifact_cache
                                 .latest_plan_minimal_artifact(&plan_ctx.id)
                                 .as_ref(),
+                            ChangeDetectionMode::Disk,
                         )?;
                         if !plan_ctx.files_changed_on_disk.is_empty() {
                             for changed_file in plan_ctx.files_changed_on_disk.iter() {
@@ -1021,6 +1030,7 @@ impl AutoBuildContext {
                                 artifact_cache
                                     .latest_plan_minimal_artifact(&plan_ctx.id)
                                     .as_ref(),
+                                ChangeDetectionMode::Disk,
                             )?;
                         }
                         results.push(RemoveStatus::Removed(plan_ctx.id.clone()));
