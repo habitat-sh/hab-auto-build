@@ -11,7 +11,7 @@ use crate::{
     cli::output::OutputFormat,
     core::{
         AnalysisType, AutoBuildConfig, AutoBuildContext, Dependency, DependencyAnalysis,
-        PackageDepGlob, PackageTarget,
+        PackageDepGlob, PackageTarget, ChangeDetectionMode,
     },
 };
 
@@ -61,7 +61,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     );
     let config = AutoBuildConfig::new(&config_path)?;
 
-    let run_context = AutoBuildContext::new(&config, &config_path)
+    let run_context = AutoBuildContext::new(&config, &config_path, ChangeDetectionMode::Disk)
         .with_context(|| eyre!("Failed to initialize run"))?;
 
     let mut analysis_types = HashSet::new();

@@ -5,7 +5,7 @@ use owo_colors::OwoColorize;
 use tracing::{error, info};
 
 use crate::core::{
-    AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget, PlanContextPathGitSyncStatus,
+    AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget, PlanContextPathGitSyncStatus, ChangeDetectionMode,
 };
 use color_eyre::eyre::{eyre, Context, Result};
 
@@ -29,7 +29,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     );
     let config = AutoBuildConfig::new(&config_path)?;
 
-    let mut run_context = AutoBuildContext::new(&config, &config_path)
+    let mut run_context = AutoBuildContext::new(&config, &config_path, ChangeDetectionMode::Disk)
         .with_context(|| eyre!("Failed to initialize run"))?;
 
     let packages = &args

@@ -13,7 +13,7 @@ use crate::{
     cli::output::OutputFormat,
     core::{
         AutoBuildConfig, AutoBuildContext, BuildPlan, PackageDepGlob, PackageTarget,
-        PlanCheckStatus,
+        PlanCheckStatus, ChangeDetectionMode,
     },
 };
 
@@ -40,7 +40,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     );
     let config = AutoBuildConfig::new(&config_path)?;
 
-    let run_context = AutoBuildContext::new(&config, &config_path)
+    let run_context = AutoBuildContext::new(&config, &config_path, ChangeDetectionMode::Disk)
         .with_context(|| eyre!("Failed to initialize run"))?;
 
     let package_indices = run_context.glob_deps(&args.packages, PackageTarget::default())?;

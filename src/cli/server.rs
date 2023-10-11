@@ -1,4 +1,4 @@
-use crate::core::{AutoBuildConfig, AutoBuildContext, DepGraphData};
+use crate::core::{AutoBuildConfig, AutoBuildContext, DepGraphData, ChangeDetectionMode};
 
 use axum::{
     body::{boxed, Full},
@@ -34,7 +34,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     );
     let config = AutoBuildConfig::new(&config_path)?;
 
-    let run_context = AutoBuildContext::new(&config, &config_path)
+    let run_context = AutoBuildContext::new(&config, &config_path, ChangeDetectionMode::Disk)
         .with_context(|| eyre!("Failed to initialize run"))?;
 
     let rt = tokio::runtime::Runtime::new()?;
