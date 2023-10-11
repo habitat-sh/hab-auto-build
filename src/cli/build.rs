@@ -345,11 +345,20 @@ fn output_plain(build_plan: BuildPlan) -> Result<()> {
                 format!("[{} remote deps]", remote_deps.len()).yellow()
             );
             for (index, remote_dep) in remote_deps.iter().enumerate() {
-                if let Dependency::RemoteDep(remote_dep) = remote_dep {
-                    info!(target: "user-ui",
-                        "       {}",
-                        format!("{} - {}", index, remote_dep).yellow()
-                    );
+                match remote_dep {
+                    Dependency::ResolvedDep(resolved_dep) => {
+                        info!(target: "user-ui",
+                            "       {}",
+                            format!("{} - {}", index, resolved_dep).yellow()
+                        );
+                    }
+                    Dependency::RemoteDep(remote_dep) => {
+                        info!(target: "user-ui",
+                            "       {}",
+                            format!("{} - {}", index, remote_dep).yellow()
+                        );
+                    }
+                    Dependency::LocalPlan(_) => {}
                 }
             }
         } else {
