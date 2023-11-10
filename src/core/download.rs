@@ -130,7 +130,7 @@ impl Download {
         let mut final_response = None;
         let mut base_headers = reqwest::header::HeaderMap::new();
         // We put a common user agent as some remote hosts forbid downloads otherwise
-        base_headers.append(header::USER_AGENT, "curl/7.68.0".parse().unwrap());
+        base_headers.append(header::USER_AGENT, "curl/7.81.0".parse().unwrap());
         let mut additional_headers = reqwest::header::HeaderMap::new();
         while final_response.is_none() {
             let mut request = reqwest::blocking::Request::new(Method::GET, url.clone());
@@ -254,7 +254,8 @@ impl Download {
             None => {
                 let start = Instant::now();
                 debug!("Starting single-threaded download of file from {}", url);
-                let request = reqwest::blocking::Request::new(Method::GET, url.clone());
+                let mut request = reqwest::blocking::Request::new(Method::GET, url.clone());
+                request.headers_mut().extend(base_headers.into_iter());
                 let response = Download::execute_request(&client, request)?;
                 let mut file = File::create(self.filename)?;
                 file.write_all(&response.bytes()?)?;
