@@ -933,7 +933,7 @@ impl ArtifactCheck for ElfCheck {
                     interpreter_name = Some(file_name.to_string());
                     if let Some(interpreter_dep) =
                         interpreter_path.package_ident(artifact_context.target)
-                    {                        
+                    {
                         if let Some(interpreter_artifact_ctx) = tdep_artifacts.get(&interpreter_dep)
                         {
                             if interpreter_artifact_ctx
@@ -1055,6 +1055,13 @@ impl ArtifactCheck for ElfCheck {
                 .map(|p| p.absolutize())
                 .collect::<Result<HashSet<_>, _>>()
                 .unwrap();
+            let interpreter_search_dir = metadata.interpreter.as_ref().map_or(None, |p| {
+                if p.is_package_path() {
+                    p.parent().map(|p| p.to_path_buf())
+                } else {
+                    None
+                }
+            });
             for library in metadata.required_libraries.iter() {
                 let mut found = false;
                 // If the library is the interpreter skip it
@@ -1171,110 +1178,191 @@ impl ArtifactCheck for ElfCheck {
                     }
                 }
 
-                for search_path in metadata.runpath.iter() {
-                    let search_path = search_path.absolutize().unwrap();
-                    if let Some(dep_ident) = search_path.package_ident(artifact_context.target) {
-                        if let Some(artifact) = tdep_artifacts.get(&dep_ident) {
-                            let library_path = search_path.join(library);
-                            let metadata = if let Some(metadata) = artifact.elfs.get(&library_path)
-                            {
-                                Some(metadata)
-                            } else {
-                                let resolved_path =
-                                    artifact.resolve_path(tdep_artifacts, library_path.as_path());
-                                if resolved_path != library_path {
-                                    trace!(
-                                        "In {}, following shared library path: {} -> {}",
-                                        path.display(),
-                                        library_path.display(),
-                                        resolved_path.display()
-                                    );
-                                    resolved_path
-                                        .package_ident(artifact.target)
-                                        .and_then(|p| tdep_artifacts.get(&p))
-                                        .and_then(|a| a.elfs.get(&resolved_path))
-                                } else {
-                                    None
-                                }
-                            };
-                            if let Some(metadata) = metadata {
-                                match metadata.elf_type {
-                                    ElfType::SharedLibrary | ElfType::Relocatable => {
-                                        found = true;
-                                        trace!(
-                                            "Found library {} required by {} in runpath entry {}",
-                                            library,
-                                            path.display(),
-                                            search_path.display()
-                                        );
-                                        unused_runpath_entries.remove(&search_path);
-                                        used_deps.insert(artifact.id.clone());
-                                        break;
-                                    }
-                                    ElfType::Executable
-                                    | ElfType::PieExecutable
-                                    | ElfType::Other => {
-                                        found = true;
-                                        trace!(
-                                            "Found library {} required by {} in runpath entry {}",
-                                            library,
-                                            path.display(),
-                                            search_path.display()
-                                        );
-                                        unused_runpath_entries.remove(&search_path);
-                                        used_deps.insert(artifact.id.clone());
-                                        if !bad_library_dependency_options
-                                            .ignored_files
-                                            .is_match(path.relative_package_path().unwrap())
-                                        {
-                                            violations.push(LeveledArtifactCheckViolation {
-                                                level: bad_library_dependency_options.level,
-                                                violation: ArtifactCheckViolation::Elf(
-                                                    ElfRule::BadLibraryDependency(
-                                                        BadLibraryDependency {
-                                                            source: path.clone(),
-                                                            library: library.clone(),
-                                                            library_path,
-                                                            elf_type: metadata.elf_type,
-                                                        },
-                                                    ),
-                                                ),
-                                            });
+                if !found {
+                    for search_path in metadata.runpath.iter() {
+                        let search_path = search_path.absolutize().unwrap();
+                        if let Some(dep_ident) = search_path.package_ident(artifact_context.target)
+                        {
+                            if let Some(artifact) = tdep_artifacts.get(&dep_ident) {
+                                let library_path = search_path.join(library);
+                                let metadata =
+                                    if let Some(metadata) = artifact.elfs.get(&library_path) {
+                                        Some(metadata)
+                                    } else {
+                                        let resolved_path = artifact
+                                            .resolve_path(tdep_artifacts, library_path.as_path());
+                                        if resolved_path != library_path {
+                                            trace!(
+                                                "In {}, following shared library path: {} -> {}",
+                                                path.display(),
+                                                library_path.display(),
+                                                resolved_path.display()
+                                            );
+                                            resolved_path
+                                                .package_ident(artifact.target)
+                                                .and_then(|p| tdep_artifacts.get(&p))
+                                                .and_then(|a| a.elfs.get(&resolved_path))
+                                        } else {
+                                            None
                                         }
-                                        break;
+                                    };
+                                if let Some(metadata) = metadata {
+                                    match metadata.elf_type {
+                                        ElfType::SharedLibrary | ElfType::Relocatable => {
+                                            found = true;
+                                            trace!(
+                                            "Found library {} required by {} in runpath entry {}",
+                                            library,
+                                            path.display(),
+                                            search_path.display()
+                                        );
+                                            unused_runpath_entries.remove(&search_path);
+                                            used_deps.insert(artifact.id.clone());
+                                            break;
+                                        }
+                                        ElfType::Executable
+                                        | ElfType::PieExecutable
+                                        | ElfType::Other => {
+                                            found = true;
+                                            trace!(
+                                            "Found library {} required by {} in runpath entry {}",
+                                            library,
+                                            path.display(),
+                                            search_path.display()
+                                        );
+                                            unused_runpath_entries.remove(&search_path);
+                                            used_deps.insert(artifact.id.clone());
+                                            if !bad_library_dependency_options
+                                                .ignored_files
+                                                .is_match(path.relative_package_path().unwrap())
+                                            {
+                                                violations.push(LeveledArtifactCheckViolation {
+                                                    level: bad_library_dependency_options.level,
+                                                    violation: ArtifactCheckViolation::Elf(
+                                                        ElfRule::BadLibraryDependency(
+                                                            BadLibraryDependency {
+                                                                source: path.clone(),
+                                                                library: library.clone(),
+                                                                library_path,
+                                                                elf_type: metadata.elf_type,
+                                                            },
+                                                        ),
+                                                    ),
+                                                });
+                                            }
+                                            break;
+                                        }
                                     }
                                 }
+                            } else if !missing_runpath_entry_dependency_options
+                                .ignored_files
+                                .is_match(path.relative_package_path().unwrap())
+                            {
+                                violations.push(LeveledArtifactCheckViolation {
+                                    level: missing_runpath_entry_dependency_options.level,
+                                    violation: ArtifactCheckViolation::Elf(
+                                        ElfRule::MissingRunPathEntryDependency(
+                                            MissingRunPathEntryDependency {
+                                                source: path.clone(),
+                                                entry: search_path.to_path_buf(),
+                                                dep_ident: dep_ident.clone(),
+                                            },
+                                        ),
+                                    ),
+                                });
                             }
-                        } else if !missing_runpath_entry_dependency_options
+                        } else if !bad_runpath_entry_options
                             .ignored_files
                             .is_match(path.relative_package_path().unwrap())
                         {
                             violations.push(LeveledArtifactCheckViolation {
-                                level: missing_runpath_entry_dependency_options.level,
-                                violation: ArtifactCheckViolation::Elf(
-                                    ElfRule::MissingRunPathEntryDependency(
-                                        MissingRunPathEntryDependency {
-                                            source: path.clone(),
-                                            entry: search_path.to_path_buf(),
-                                            dep_ident: dep_ident.clone(),
-                                        },
-                                    ),
-                                ),
+                                level: bad_runpath_entry_options.level,
+                                violation: ArtifactCheckViolation::Elf(ElfRule::BadRunPathEntry(
+                                    BadRunPathEntry {
+                                        source: path.clone(),
+                                        entry: search_path.to_path_buf(),
+                                    },
+                                )),
                             });
                         }
-                    } else if !bad_runpath_entry_options
-                        .ignored_files
-                        .is_match(path.relative_package_path().unwrap())
-                    {
-                        violations.push(LeveledArtifactCheckViolation {
-                            level: bad_runpath_entry_options.level,
-                            violation: ArtifactCheckViolation::Elf(ElfRule::BadRunPathEntry(
-                                BadRunPathEntry {
-                                    source: path.clone(),
-                                    entry: search_path.to_path_buf(),
-                                },
-                            )),
-                        });
+                    }
+                }
+
+                if !found {
+                    // Search the interpreter directory for the library
+                    if let Some(search_path) = interpreter_search_dir.as_ref() {
+                        let search_path = search_path.absolutize().unwrap();
+                        if let Some(dep_ident) = search_path.package_ident(artifact_context.target)
+                        {
+                            if let Some(artifact) = tdep_artifacts.get(&dep_ident) {
+                                let library_path = search_path.join(library);
+                                let metadata =
+                                    if let Some(metadata) = artifact.elfs.get(&library_path) {
+                                        Some(metadata)
+                                    } else {
+                                        let resolved_path = artifact
+                                            .resolve_path(tdep_artifacts, library_path.as_path());
+                                        if resolved_path != library_path {
+                                            trace!(
+                                                "In {}, following shared library path: {} -> {}",
+                                                path.display(),
+                                                library_path.display(),
+                                                resolved_path.display()
+                                            );
+                                            resolved_path
+                                                .package_ident(artifact.target)
+                                                .and_then(|p| tdep_artifacts.get(&p))
+                                                .and_then(|a| a.elfs.get(&resolved_path))
+                                        } else {
+                                            None
+                                        }
+                                    };
+                                if let Some(metadata) = metadata {
+                                    match metadata.elf_type {
+                                        ElfType::SharedLibrary | ElfType::Relocatable => {
+                                            found = true;
+                                            trace!(
+                                            "Found library {} required by {} in interpreter directory {}",
+                                            library,
+                                            path.display(),
+                                            search_path.display()
+                                        );
+                                            used_deps.insert(artifact.id.clone());
+                                        }
+                                        ElfType::Executable
+                                        | ElfType::PieExecutable
+                                        | ElfType::Other => {
+                                            found = true;
+                                            trace!(
+                                            "Found library {} required by {} in interpreter directory {}",
+                                            library,
+                                            path.display(),
+                                            search_path.display()
+                                        );
+                                            used_deps.insert(artifact.id.clone());
+                                            if !bad_library_dependency_options
+                                                .ignored_files
+                                                .is_match(path.relative_package_path().unwrap())
+                                            {
+                                                violations.push(LeveledArtifactCheckViolation {
+                                                    level: bad_library_dependency_options.level,
+                                                    violation: ArtifactCheckViolation::Elf(
+                                                        ElfRule::BadLibraryDependency(
+                                                            BadLibraryDependency {
+                                                                source: path.clone(),
+                                                                library: library.clone(),
+                                                                library_path,
+                                                                elf_type: metadata.elf_type,
+                                                            },
+                                                        ),
+                                                    ),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

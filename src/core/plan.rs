@@ -137,6 +137,7 @@ pub(crate) struct RawPlanData {
     pub licenses: Vec<String>,
     pub deps: Vec<PackageDepIdent>,
     pub build_deps: Vec<PackageDepIdent>,
+    pub scaffolding_dep: Option<PackageDepIdent>
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize, PartialOrd, Ord)]
@@ -314,6 +315,7 @@ impl PlanContext {
                 build_deps: raw_data
                     .build_deps
                     .into_iter()
+                    .chain(raw_data.scaffolding_dep.into_iter())
                     .map(|d| d.to_resolved_dep_ident(target.to_owned()))
                     .collect(),
                 latest_artifact: None,

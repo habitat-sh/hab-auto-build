@@ -47,6 +47,12 @@ else
   echo "\"licenses\": [],"
 fi
 
+if [[ ! -z "${pkg_scaffolding}" ]]; then
+  echo "\"scaffolding_dep\": \"${pkg_scaffolding}\","
+else
+  echo "\"scaffolding_dep\": null,"
+fi
+
 echo "\"deps\": $(json_array "${pkg_deps[@]}"), \
 \"build_deps\": $(json_array "${pkg_build_deps[@]}")\
 }"
