@@ -438,7 +438,7 @@ impl ArtifactCheck for ScriptCheck {
             .artifact_rules
             .iter()
             .filter_map(|rule| {
-                if let ArtifactRuleOptions::Script(ScriptRuleOptions::ScriptInterpreterNotFound(
+                if let ArtifactRuleOptions::Script(ScriptRuleOptions::UnlistedScriptInterpreter(
                     options,
                 )) = &rule.options
                 {
