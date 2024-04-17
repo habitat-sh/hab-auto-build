@@ -8,7 +8,8 @@ use tracing::info;
 use crate::{
     cli::output::OutputFormat,
     core::{
-        AutoBuildConfig, AutoBuildContext, PackageDiff, PackageName, PackageOrigin, PackageTarget, ChangeDetectionMode,
+        AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, PackageDiff, PackageName,
+        PackageOrigin, PackageTarget,
     },
 };
 
@@ -31,10 +32,18 @@ pub(crate) fn execute(args: Params) -> Result<()> {
     let source_config = AutoBuildConfig::new(&source_config_path)?;
     let target_config = AutoBuildConfig::new(&target_config_path)?;
 
-    let source_run_context = AutoBuildContext::new(&source_config, &source_config_path, ChangeDetectionMode::Disk)
-        .with_context(|| eyre!("Failed to initialize run"))?;
-    let target_run_context = AutoBuildContext::new(&target_config, &target_config_path, ChangeDetectionMode::Disk)
-        .with_context(|| eyre!("Failed to initialize run"))?;
+    let source_run_context = AutoBuildContext::new(
+        &source_config,
+        &source_config_path,
+        ChangeDetectionMode::Disk,
+    )
+    .with_context(|| eyre!("Failed to initialize run"))?;
+    let target_run_context = AutoBuildContext::new(
+        &target_config,
+        &target_config_path,
+        ChangeDetectionMode::Disk,
+    )
+    .with_context(|| eyre!("Failed to initialize run"))?;
 
     let diffs = target_run_context.compare(&source_run_context);
 

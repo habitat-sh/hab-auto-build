@@ -10,8 +10,8 @@ use clap::Args;
 use crate::{
     cli::output::OutputFormat,
     core::{
-        AnalysisType, AutoBuildConfig, AutoBuildContext, Dependency, DependencyAnalysis,
-        PackageDepGlob, PackageTarget, ChangeDetectionMode,
+        AnalysisType, AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, Dependency,
+        DependencyAnalysis, PackageDepGlob, PackageTarget,
     },
 };
 

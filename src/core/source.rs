@@ -2,7 +2,8 @@ use std::{
     collections::BTreeSet,
     fs::File,
     io::{BufReader, Read},
-    path::{Path, PathBuf}, time::Instant,
+    path::{Path, PathBuf},
+    time::Instant,
 };
 
 use askalono::{ScanMode, ScanStrategy, Store, TextData};
@@ -14,7 +15,7 @@ use lazy_static::lazy_static;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
-use tracing::{error, trace, debug};
+use tracing::{debug, error, trace};
 use xz2::bufread::XzDecoder;
 
 use super::{FileKind, PackageSha256Sum};
@@ -161,7 +162,11 @@ impl SourceContext {
                     todo!()
                 }
             }
-            FileKind::Elf | FileKind::MachBinary | FileKind::UnixArchive | FileKind::Script | FileKind::Other => {
+            FileKind::Elf
+            | FileKind::MachBinary
+            | FileKind::UnixArchive
+            | FileKind::Script
+            | FileKind::Other => {
                 format = (file_type, None);
                 licenses = BTreeSet::default();
             }
@@ -223,7 +228,10 @@ impl SourceContext {
                 }
             })
             .collect();
-        debug!("Completed scanning for licenses in archive in {}s", start.elapsed().as_secs_f32());
+        debug!(
+            "Completed scanning for licenses in archive in {}s",
+            start.elapsed().as_secs_f32()
+        );
         Ok(licenses)
     }
 }

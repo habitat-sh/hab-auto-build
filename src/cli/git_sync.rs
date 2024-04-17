@@ -5,7 +5,8 @@ use owo_colors::OwoColorize;
 use tracing::{error, info};
 
 use crate::core::{
-    AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget, PlanContextPathGitSyncStatus, ChangeDetectionMode,
+    AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, PackageDepGlob, PackageTarget,
+    PlanContextPathGitSyncStatus,
 };
 use color_eyre::eyre::{eyre, Context, Result};
 

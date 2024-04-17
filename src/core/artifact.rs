@@ -946,8 +946,8 @@ impl ArtifactContext {
                                 }
                             })
                         }
-                        RawArtifactItem::Resource(path, file_mode, kind, data) => Ok(
-                            match Resource::from_data(&path, file_mode, kind, data) {
+                        RawArtifactItem::Resource(path, file_mode, kind, data) => {
+                            Ok(match Resource::from_data(&path, file_mode, kind, data) {
                                 Err(err) => {
                                     error!(
                                         "Failed to read {} detected as {:?} resource: {:?}",
@@ -957,24 +957,22 @@ impl ArtifactContext {
                                     );
                                     vec![]
                                 }
-                                Ok(resource) => {
-                                    match resource {
-                                        Resource::Elf(metadata) => {
-                                            vec![IndexedArtifactItem::Elf((path, metadata))]
-                                        }
-                                        Resource::Script(metadata) => {
-                                            vec![IndexedArtifactItem::Script((path, metadata))]
-                                        }
-                                        Resource::MachO(metadata) => {
-                                            vec![IndexedArtifactItem::MachO((path, metadata))]
-                                        }
-                                        _ => {
-                                            vec![]
-                                        }
+                                Ok(resource) => match resource {
+                                    Resource::Elf(metadata) => {
+                                        vec![IndexedArtifactItem::Elf((path, metadata))]
                                     }
-                                }       
-                            }
-                        ),
+                                    Resource::Script(metadata) => {
+                                        vec![IndexedArtifactItem::Script((path, metadata))]
+                                    }
+                                    Resource::MachO(metadata) => {
+                                        vec![IndexedArtifactItem::MachO((path, metadata))]
+                                    }
+                                    _ => {
+                                        vec![]
+                                    }
+                                },
+                            })
+                        }
                     }
                 } else {
                     Ok(vec![])

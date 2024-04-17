@@ -1,4 +1,4 @@
-use crate::core::{AutoBuildConfig, AutoBuildContext, DepGraphData, ChangeDetectionMode};
+use crate::core::{AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, DepGraphData};
 
 use axum::{
     body::{boxed, Full},

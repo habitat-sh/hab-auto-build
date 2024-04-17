@@ -14,7 +14,8 @@ use crate::{
     core::{
         habitat::{MACOS_SYSTEM_DIRS, MACOS_SYSTEM_LIBS},
         ArtifactCache, ArtifactContext, GlobSetExpression, MachOType, PackageIdent, PackagePath,
-    }, store::Store,
+    },
+    store::Store,
 };
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -3,7 +3,10 @@ use std::{env, path::PathBuf};
 use clap::Args;
 use tracing::{error, info};
 
-use crate::core::{AddStatus, AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget, ChangeDetectionMode};
+use crate::core::{
+    AddStatus, AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, PackageDepGlob,
+    PackageTarget,
+};
 use color_eyre::eyre::{eyre, Context, Result};
 
 #[derive(Debug, Args)]

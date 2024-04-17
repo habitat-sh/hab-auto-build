@@ -501,7 +501,7 @@ impl DepGraph {
                                             DependencyType::Studio,
                                         );
                                     }
-                                    // Use the bootstrap studio if there is a local / resolved bootstrap 
+                                    // Use the bootstrap studio if there is a local / resolved bootstrap
                                     // studio plan and no local / resolved standard studio plan
                                     (Dependency::ResolvedDep(_), Dependency::RemoteDep(_))
                                     | (Dependency::LocalPlan(_), Dependency::RemoteDep(_)) => {

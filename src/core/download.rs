@@ -9,7 +9,8 @@ use reqwest::{
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf}, time::Instant,
+    path::{Path, PathBuf},
+    time::Instant,
 };
 use suppaftp::FtpStream;
 use tracing::{debug, log::error};

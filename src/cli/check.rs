@@ -4,7 +4,8 @@ use owo_colors::OwoColorize;
 use std::{
     env,
     fmt::Write,
-    path::{Path, PathBuf}, time::Instant,
+    path::{Path, PathBuf},
+    time::Instant,
 };
 use tracing::{error, info};
 
@@ -12,8 +13,8 @@ use crate::{
     check::{LeveledArtifactCheckViolation, LeveledSourceCheckViolation, ViolationLevel},
     cli::output::OutputFormat,
     core::{
-        AutoBuildConfig, AutoBuildContext, BuildPlan, PackageDepGlob, PackageTarget,
-        PlanCheckStatus, ChangeDetectionMode,
+        AutoBuildConfig, AutoBuildContext, BuildPlan, ChangeDetectionMode, PackageDepGlob,
+        PackageTarget, PlanCheckStatus,
     },
 };
 

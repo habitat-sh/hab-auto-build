@@ -137,7 +137,7 @@ pub(crate) struct RawPlanData {
     pub licenses: Vec<String>,
     pub deps: Vec<PackageDepIdent>,
     pub build_deps: Vec<PackageDepIdent>,
-    pub scaffolding_dep: Option<PackageDepIdent>
+    pub scaffolding_dep: Option<PackageDepIdent>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize, PartialOrd, Ord)]
