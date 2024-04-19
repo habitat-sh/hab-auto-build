@@ -585,12 +585,12 @@ impl Checker {
     #[cfg(target_os = "linux")]
     pub fn new() -> Checker {
         Checker {
-            source_checks: vec![Box::new(LicenseCheck::default())],
+            source_checks: vec![Box::<LicenseCheck>::default()],
             artifact_checks: vec![
-                Box::new(PackageBeforeCheck::default()),
-                Box::new(ElfCheck::default()),
-                Box::new(ScriptCheck::default()),
-                Box::new(PackageAfterCheck::default()),
+                Box::<PackageBeforeCheck>::default(),
+                Box::<ElfCheck>::default(),
+                Box::<ScriptCheck>::default(),
+                Box::<PackageAfterCheck>::default(),
             ],
         }
     }

@@ -62,8 +62,11 @@ lazy_static! {
         which("hab").expect("Failed to find hab binary in environment");
 }
 
+#[allow(dead_code)]
 const MACOS_CPU_TYPE: u32 = 16777228;
+#[allow(dead_code)]
 const MACOS_CPU_SUBTYPE: u32 = 2;
+#[allow(dead_code)]
 const SANDBOX_DEFAULTS: &str = include_str!("../scripts/sandbox-defaults.sb");
 
 pub(crate) fn install_artifact_offline(package_ident: &PackageIdent) -> Result<()> {
@@ -364,7 +367,7 @@ pub(crate) fn native_package_build(
             ));
         if let Some(source) = &build_step.plan_ctx.source {
             let source_cache_folder = HabitatRootPath::default().source_cache();
-            let store_archive = store.package_source_store_path(&source).archive_data_path();
+            let store_archive = store.package_source_store_path(source).archive_data_path();
             let source_cache_path = source_cache_folder.as_ref().join(source.url.filename()?);
             cmd = cmd.arg("-v").arg(format!(
                 "{}:{}",
@@ -381,9 +384,9 @@ pub(crate) fn native_package_build(
             .arg("-v")
             .arg(format!("{}:/output", build_output_dir.display()))
             .arg("-v")
-            .arg(format!("/hab/cache/artifacts:/hab/cache/artifacts"))
+            .arg("/hab/cache/artifacts:/hab/cache/artifacts")
             .arg("-v")
-            .arg(format!("/hab/cache/keys:/hab/cache/keys"))
+            .arg("/hab/cache/keys:/hab/cache/keys")
             .arg("--workdir")
             .arg("/src")
             .arg("-e")
@@ -402,10 +405,7 @@ pub(crate) fn native_package_build(
                 build_step.plan_ctx.id.as_ref().origin
             ))
             .arg("-e")
-            .arg(format!(
-                "BUILD_PKG_TARGET={}",
-                PackageTarget::default().to_string()
-            ))
+            .arg(format!("BUILD_PKG_TARGET={}", PackageTarget::default()))
             .arg(docker_image)
             .arg("build")
             .arg(relative_plan_context)
@@ -477,6 +477,7 @@ pub(crate) fn native_package_build(
     }
 }
 
+#[allow(dead_code)]
 fn compute_binary_impurities(binary_path: impl AsRef<Path>) -> Result<BTreeSet<PathBuf>> {
     let mut impure_paths = BTreeSet::new();
     let mut unvisted_paths = VecDeque::new();
@@ -537,6 +538,7 @@ fn compute_binary_impurities(binary_path: impl AsRef<Path>) -> Result<BTreeSet<P
     Ok(impure_paths)
 }
 
+#[allow(dead_code)]
 fn build_sandbox_profile(tmp_dir: impl AsRef<Path>) -> Result<PathBuf> {
     let sandbox_profile_path = tmp_dir.as_ref().join("sandbox-profile.sb");
     let mut sandbox_profile = String::new();
@@ -687,7 +689,7 @@ pub(crate) fn bootstrap_package_build(
             tmp_path.as_ref().display()
         )
     })?;
-    let build_log_path = tmp_dir.path().join("build.log".to_string());
+    let build_log_path = tmp_dir.path().join("build.log");
     let build_log = std::fs::File::create(&build_log_path).with_context(|| {
         format!(
             "Failed to create build log at '{}'",

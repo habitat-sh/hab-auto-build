@@ -695,7 +695,7 @@ pub(crate) struct ElfCheck {}
 impl ArtifactCheck for ElfCheck {
     fn artifact_context_check(
         &self,
-        store: &Store,
+        _store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         _artifact_cache: &mut ArtifactCache,
@@ -911,22 +911,21 @@ impl ArtifactCheck for ElfCheck {
             let mut interpreter_name = None;
 
             if let Some(interpreter_path) = metadata.interpreter.as_ref() {
-                if !metadata.is_executable {
-                    if !unexpected_elf_interpreter_options
+                if !metadata.is_executable
+                    && !unexpected_elf_interpreter_options
                         .ignored_files
                         .is_match(path.relative_package_path().unwrap())
-                    {
-                        if let Some(interpreter_path) = metadata.interpreter.as_ref() {
-                            violations.push(LeveledArtifactCheckViolation {
-                                level: unexpected_elf_interpreter_options.level,
-                                violation: ArtifactCheckViolation::Elf(
-                                    ElfRule::UnexpectedELFInterpreter(UnexpectedELFInterpreter {
-                                        source: path.clone(),
-                                        interpreter: interpreter_path.to_path_buf(),
-                                    }),
-                                ),
-                            });
-                        }
+                {
+                    if let Some(interpreter_path) = metadata.interpreter.as_ref() {
+                        violations.push(LeveledArtifactCheckViolation {
+                            level: unexpected_elf_interpreter_options.level,
+                            violation: ArtifactCheckViolation::Elf(
+                                ElfRule::UnexpectedELFInterpreter(UnexpectedELFInterpreter {
+                                    source: path.clone(),
+                                    interpreter: interpreter_path.to_path_buf(),
+                                }),
+                            ),
+                        });
                     }
                 }
                 if let Some(file_name) = interpreter_path.file_name().and_then(|x| x.to_str()) {
@@ -1055,7 +1054,7 @@ impl ArtifactCheck for ElfCheck {
                 .map(|p| p.absolutize())
                 .collect::<Result<HashSet<_>, _>>()
                 .unwrap();
-            let interpreter_search_dir = metadata.interpreter.as_ref().map_or(None, |p| {
+            let interpreter_search_dir = metadata.interpreter.as_ref().and_then(|p| {
                 if p.is_package_path() {
                     p.parent().map(|p| p.to_path_buf())
                 } else {
