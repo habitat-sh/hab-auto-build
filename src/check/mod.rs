@@ -76,6 +76,7 @@ impl PlanContextConfig {
         self.artifact_rules.extend_from_slice(&other.artifact_rules);
         self
     }
+
     pub fn from_str(value: &str, target: PackageTarget) -> Result<PlanContextConfig> {
         let document = value.parse::<Document>()?;
         let mut restructured_document = Document::new();
@@ -86,42 +87,40 @@ impl PlanContextConfig {
                 .get(target.to_string().as_str())
                 .and_then(|v| v.get("rules")),
         ];
-        for rule_set in rule_sets {
-            if let Some(rules) = rule_set {
-                let rules = rules
-                    .as_table()
-                    .ok_or(eyre!("Invalid plan configuration, 'rules' must be a table"))?;
-                for (rule_id, rule_config) in rules.iter() {
-                    if let Some(level) = rule_config.as_str() {
-                        let mut rule = InlineTable::default();
-                        rule.insert(
-                            "id",
-                            Value::String(Formatted::<String>::new(rule_id.to_string())),
-                        );
-                        let mut rule_options = InlineTable::default();
-                        rule_options.insert(
-                            "level",
-                            Value::String(Formatted::<String>::new(level.to_string())),
-                        );
-                        rule.insert("options", Value::InlineTable(rule_options));
-                        restructured_rules.push(Value::InlineTable(rule));
-                    } else if rule_config.is_inline_table() {
-                        let mut rule = InlineTable::default();
-                        rule.insert(
-                            "id",
-                            Value::String(Formatted::<String>::new(rule_id.to_string())),
-                        );
-                        rule.insert(
-                            "options",
-                            Value::InlineTable(rule_config.as_inline_table().unwrap().clone()),
-                        );
-                        restructured_rules.push(Value::InlineTable(rule));
-                    } else {
-                        return Err(eyre!(
-                            "Invalid rule configuration for '{}'",
-                            rule_id.to_string()
-                        ));
-                    }
+        for rules in rule_sets.into_iter().flatten() {
+            let rules = rules
+                .as_table()
+                .ok_or(eyre!("Invalid plan configuration, 'rules' must be a table"))?;
+            for (rule_id, rule_config) in rules.iter() {
+                if let Some(level) = rule_config.as_str() {
+                    let mut rule = InlineTable::default();
+                    rule.insert(
+                        "id",
+                        Value::String(Formatted::<String>::new(rule_id.to_string())),
+                    );
+                    let mut rule_options = InlineTable::default();
+                    rule_options.insert(
+                        "level",
+                        Value::String(Formatted::<String>::new(level.to_string())),
+                    );
+                    rule.insert("options", Value::InlineTable(rule_options));
+                    restructured_rules.push(Value::InlineTable(rule));
+                } else if rule_config.is_inline_table() {
+                    let mut rule = InlineTable::default();
+                    rule.insert(
+                        "id",
+                        Value::String(Formatted::<String>::new(rule_id.to_string())),
+                    );
+                    rule.insert(
+                        "options",
+                        Value::InlineTable(rule_config.as_inline_table().unwrap().clone()),
+                    );
+                    restructured_rules.push(Value::InlineTable(rule));
+                } else {
+                    return Err(eyre!(
+                        "Invalid rule configuration for '{}'",
+                        rule_id.to_string()
+                    ));
                 }
             }
         }
@@ -574,12 +573,12 @@ impl Checker {
         use self::artifact::macho::MachOCheck;
 
         Checker {
-            source_checks: vec![Box::new(LicenseCheck::default())],
+            source_checks: vec![Box::<LicenseCheck>::default()],
             artifact_checks: vec![
-                Box::new(PackageBeforeCheck::default()),
-                Box::new(MachOCheck::default()),
-                Box::new(ScriptCheck::default()),
-                Box::new(PackageAfterCheck::default()),
+                Box::<PackageBeforeCheck>::default(),
+                Box::<MachOCheck>::default(),
+                Box::<ScriptCheck>::default(),
+                Box::<PackageAfterCheck>::default(),
             ],
         }
     }

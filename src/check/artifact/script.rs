@@ -362,7 +362,7 @@ impl Default for ScriptCheck {
 impl ArtifactCheck for ScriptCheck {
     fn artifact_context_check(
         &self,
-        store: &Store,
+        _store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         _artifact_cache: &mut ArtifactCache,
@@ -474,18 +474,16 @@ impl ArtifactCheck for ScriptCheck {
         for (path, metadata) in artifact_context.scripts.iter() {
             let command = if metadata.interpreter.command.is_absolute() {
                 metadata.interpreter.command.clone()
+            } else if let Some(value) = path.parent().map(|p| {
+                p.join(metadata.interpreter.command.as_path())
+                    .absolutize()
+                    .unwrap()
+                    .to_path_buf()
+            }) {
+                value
             } else {
-                if let Some(value) = path.parent().map(|p| {
-                    p.join(metadata.interpreter.command.as_path())
-                        .absolutize()
-                        .unwrap()
-                        .to_path_buf()
-                }) {
-                    value
-                } else {
-                    error!(target: "user-ui", "Could not determine interpreter for {} from header: {}", path.display(), metadata.interpreter.raw);
-                    continue;
-                }
+                error!(target: "user-ui", "Could not determine interpreter for {} from header: {}", path.display(), metadata.interpreter.raw);
+                continue;
             };
             // Resolves the path if it is a symlink
             debug!(
@@ -540,23 +538,21 @@ impl ArtifactCheck for ScriptCheck {
                                 ),
                             });
                         }
-                    } else {
-                        if !missing_env_script_interpreter_options
-                            .ignored_files
-                            .is_match(path.relative_package_path().unwrap())
-                        {
-                            violations.push(LeveledArtifactCheckViolation {
-                                level: missing_env_script_interpreter_options.level,
-                                violation: ArtifactCheckViolation::Script(
-                                    ScriptRule::MissingEnvScriptInterpreter(
-                                        MissingEnvScriptInterpreter {
-                                            source: path.clone(),
-                                            raw_interpreter: metadata.interpreter.raw.clone(),
-                                        },
-                                    ),
+                    } else if !missing_env_script_interpreter_options
+                        .ignored_files
+                        .is_match(path.relative_package_path().unwrap())
+                    {
+                        violations.push(LeveledArtifactCheckViolation {
+                            level: missing_env_script_interpreter_options.level,
+                            violation: ArtifactCheckViolation::Script(
+                                ScriptRule::MissingEnvScriptInterpreter(
+                                    MissingEnvScriptInterpreter {
+                                        source: path.clone(),
+                                        raw_interpreter: metadata.interpreter.raw.clone(),
+                                    },
                                 ),
-                            });
-                        }
+                            ),
+                        });
                     }
                 } else if let Some(interpreter_artifact_ctx) = tdep_artifacts.get(&interpreter_dep)
                 {
@@ -580,10 +576,7 @@ impl ArtifactCheck for ScriptCheck {
                     {
                         let mut interpreter_listed = false;
                         for intermediate in intermediates.iter() {
-                            if interpreter_artifact_ctx
-                                .interpreters
-                                .contains(&intermediate)
-                            {
+                            if interpreter_artifact_ctx.interpreters.contains(intermediate) {
                                 interpreter_listed = true;
                             }
                         }

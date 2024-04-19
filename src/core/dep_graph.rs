@@ -211,6 +211,7 @@ impl From<&DepGraph> for DepGraphData {
 
 pub(crate) struct DepGraph {
     pub build_graph: StableGraph<Dependency, DependencyType, Directed>,
+    #[allow(dead_code)]
     pub known_versions: PackageVersionList,
 }
 
@@ -301,11 +302,9 @@ impl DepGraph {
                                     .get(&PackageBuildVersion::Static(version.to_owned()))
                                     .and_then(|v| v.get(release)),
                                 // Get the last version, last release
-                                (PackageVersion::Unresolved, PackageRelease::Unresolved) => v
-                                    .values()
-                                    .rev()
-                                    .next()
-                                    .and_then(|v| v.values().rev().next()),
+                                (PackageVersion::Unresolved, PackageRelease::Unresolved) => {
+                                    v.values().next_back().and_then(|v| v.values().next_back())
+                                }
                                 // This is impossible to reach
                                 (PackageVersion::Unresolved, PackageRelease::Resolved(_)) => {
                                     panic!("Invalid package dependency: '{}'", plan_dep)
@@ -339,13 +338,11 @@ impl DepGraph {
         for feedback_edge in feedback_edges.iter() {
             if ignore_cycles {
                 build_graph.remove_edge(*feedback_edge);
-            } else {
-                if let Some((start, end)) = build_graph.edge_endpoints(*feedback_edge) {
-                    error!(target: "user-log",
-                        "Build dependency {:?} depends on {:?} which creates a cycle",
-                        build_graph[start], build_graph[end]
-                    );
-                }
+            } else if let Some((start, end)) = build_graph.edge_endpoints(*feedback_edge) {
+                error!(target: "user-log",
+                    "Build dependency {:?} depends on {:?} which creates a cycle",
+                    build_graph[start], build_graph[end]
+                );
             }
         }
 
@@ -366,11 +363,7 @@ impl DepGraph {
             HashMap::new();
         let mut bootstrap_build_studio_tdeps: HashMap<PackageTarget, Vec<NodeIndex>> =
             HashMap::new();
-        let dep_node_indices = dep_graph
-            .build_graph
-            .node_indices()
-            .into_iter()
-            .collect::<Vec<_>>();
+        let dep_node_indices = dep_graph.build_graph.node_indices().collect::<Vec<_>>();
         for dep_node_index in dep_node_indices {
             let dep_target = dep_graph.build_graph[dep_node_index].target();
             let standard_build_studio_node_index = resolved_standard_build_studios
@@ -543,6 +536,7 @@ impl DepGraph {
         &mut self.build_graph[node_index]
     }
 
+    #[allow(dead_code)]
     pub fn deps<'a>(
         &self,
         node_indices: impl IntoIterator<Item = &'a NodeIndex>,
@@ -553,6 +547,7 @@ impl DepGraph {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn get_dep_nodes(&self, dep_ident: &PackageDepIdent) -> Vec<NodeIndex> {
         let mut dep_nodes = Vec::new();
         for (node_index, node) in self.build_graph.node_references() {
@@ -584,7 +579,7 @@ impl DepGraph {
                 Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => None,
                 Dependency::LocalPlan(plan_ctx) => {
                     if plan_ctx.id.as_ref().satisfies_dependency(dep_ident) {
-                        return Some(node_index);
+                        Some(node_index)
                     } else {
                         None
                     }
@@ -734,8 +729,7 @@ impl DepGraph {
         // Get build_rdeps of changed dependencies
         let mut affected_node_indices = HashSet::new();
         let mut changed_node_indices = changed_dep_causes.keys().cloned().collect::<Vec<_>>();
-        while !changed_node_indices.is_empty() {
-            let changed_node_index = changed_node_indices.pop().unwrap();
+        while let Some(changed_node_index) = changed_node_indices.pop() {
             affected_node_indices.insert(changed_node_index);
             for (rev_dep_node_index, rev_dep_node_type) in self
                 .build_graph
@@ -748,42 +742,36 @@ impl DepGraph {
                 }
                 let rev_dep_causes = changed_dep_causes.entry(rev_dep_node_index).or_default();
                 if let DependencyType::Studio = rev_dep_node_type {
-                    if rev_dep_causes
-                        .iter_mut()
-                        .find(|c| {
-                            matches!(c, DependencyChangeCause::DependencyStudioNeedRebuild { .. })
-                        })
-                        .is_none()
-                    {
+                    if !rev_dep_causes.iter_mut().any(|c| {
+                        matches!(c, DependencyChangeCause::DependencyStudioNeedRebuild { .. })
+                    }) {
                         let plan_ctx = self.build_graph[changed_node_index].plan_ctx().unwrap();
                         rev_dep_causes.push(DependencyChangeCause::DependencyStudioNeedRebuild {
                             plan: plan_ctx.id.clone(),
                         })
                     }
+                } else if let Some(DependencyChangeCause::DependencyPlansNeedRebuild { plans }) =
+                    rev_dep_causes.iter_mut().find(|c| {
+                        matches!(c, DependencyChangeCause::DependencyPlansNeedRebuild { .. })
+                    })
+                {
+                    let plan_ctx = self.build_graph[changed_node_index].plan_ctx().unwrap();
+                    plans.insert((
+                        *rev_dep_node_type,
+                        plan_ctx.id.clone(),
+                        plan_ctx.plan_path.to_owned(),
+                    ));
                 } else {
-                    if let Some(DependencyChangeCause::DependencyPlansNeedRebuild { plans }) =
-                        rev_dep_causes.iter_mut().find(|c| {
-                            matches!(c, DependencyChangeCause::DependencyPlansNeedRebuild { .. })
-                        })
-                    {
-                        let plan_ctx = self.build_graph[changed_node_index].plan_ctx().unwrap();
-                        plans.insert((
+                    let plan_ctx = self.build_graph[changed_node_index].plan_ctx().unwrap();
+                    rev_dep_causes.push(DependencyChangeCause::DependencyPlansNeedRebuild {
+                        plans: vec![(
                             *rev_dep_node_type,
                             plan_ctx.id.clone(),
                             plan_ctx.plan_path.to_owned(),
-                        ));
-                    } else {
-                        let plan_ctx = self.build_graph[changed_node_index].plan_ctx().unwrap();
-                        rev_dep_causes.push(DependencyChangeCause::DependencyPlansNeedRebuild {
-                            plans: vec![(
-                                *rev_dep_node_type,
-                                plan_ctx.id.clone(),
-                                plan_ctx.plan_path.to_owned(),
-                            )]
-                            .into_iter()
-                            .collect(),
-                        })
-                    }
+                        )]
+                        .into_iter()
+                        .collect(),
+                    })
                 }
             }
         }
@@ -848,17 +836,14 @@ impl DepGraph {
             }
             DependencyDepth::Transitive => {
                 let mut nodes_to_skip = node_indices.len();
-                while !node_indices.is_empty() {
-                    let node_index = node_indices.pop().unwrap();
+                while let Some(node_index) = node_indices.pop() {
                     if include_start_nodes {
                         node_all_deps.insert(node_index);
                     } else {
                         if nodes_to_skip == 0 {
                             node_all_deps.insert(node_index);
                         }
-                        if nodes_to_skip > 0 {
-                            nodes_to_skip -= 1;
-                        }
+                        nodes_to_skip = nodes_to_skip.saturating_sub(1);
                     }
                     for dep_node_index in self
                         .build_graph
@@ -900,7 +885,7 @@ impl DepGraph {
                     .collect::<Vec<_>>(),
             }
         } else {
-            dep_graph.node_indices().into_iter().collect::<Vec<_>>()
+            dep_graph.node_indices().collect::<Vec<_>>()
         }
     }
 }

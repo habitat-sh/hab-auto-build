@@ -200,6 +200,7 @@ fn output_json(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn output_pretty(_deps: Vec<&Dependency>) {
     todo!()
 }

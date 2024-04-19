@@ -11,7 +11,6 @@ use axum::{
 };
 use clap::Args;
 use color_eyre::eyre::{eyre, Context, Result};
-use petgraph::visit::EdgeRef;
 use rust_embed::RustEmbed;
 use serde_json::Value;
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -86,6 +85,7 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
 }
 
 // Finally, we use a fallback route for anything that didn't match.
+#[allow(dead_code)]
 async fn not_found() -> Html<&'static str> {
     Html("<h1>404</h1><p>Not Found</p>")
 }

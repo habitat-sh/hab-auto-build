@@ -230,7 +230,7 @@ impl LicenseCheck {
             .expect("Default rule missing");
 
         for license_expression in license_expressions {
-            match spdx::Expression::parse(&license_expression) {
+            match spdx::Expression::parse(license_expression) {
                 Ok(expression) => {
                     for req_expression in expression.requirements() {
                         // Transform license id into correct string form
@@ -255,9 +255,7 @@ impl LicenseCheck {
                             spdx::LicenseItem::Other {
                                 doc_ref: _,
                                 lic_ref,
-                            } => {
-                                format!("{}", lic_ref)
-                            }
+                            } => lic_ref.to_string(),
                         };
                         if !specified_licenses.contains(&license_id) {
                             specified_licenses.insert(license_id);
@@ -353,7 +351,7 @@ impl SourceCheck for LicenseCheck {
         plan_context: &PlanContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
-        LicenseCheck::source_context_check(&self, rules, &plan_context.licenses, source_context)
+        LicenseCheck::source_context_check(self, rules, &plan_context.licenses, source_context)
     }
 
     fn source_context_check_with_artifact(
@@ -362,6 +360,6 @@ impl SourceCheck for LicenseCheck {
         artifact_context: &ArtifactContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation> {
-        LicenseCheck::source_context_check(&self, rules, &artifact_context.licenses, source_context)
+        LicenseCheck::source_context_check(self, rules, &artifact_context.licenses, source_context)
     }
 }

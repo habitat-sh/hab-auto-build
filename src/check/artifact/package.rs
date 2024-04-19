@@ -335,7 +335,7 @@ pub(crate) struct PackageBeforeCheck {}
 impl ArtifactCheck for PackageBeforeCheck {
     fn artifact_context_check(
         &self,
-        store: &Store,
+        _store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         artifact_cache: &mut ArtifactCache,
@@ -511,7 +511,10 @@ impl ArtifactCheck for PackageBeforeCheck {
                     None
                 }
             })
-            .chain(Some((artifact_context.id.clone(), artifact_context.clone())).into_iter()) // The artifact as it's own dependency
+            .chain(Some((
+                artifact_context.id.clone(),
+                artifact_context.clone(),
+            ))) // The artifact as it's own dependency
             .collect::<HashMap<PackageIdent, ArtifactContext>>();
 
         let mut runtime_binaries: HashMap<OsString, PathBuf> = HashMap::new();
@@ -661,7 +664,7 @@ pub(crate) struct PackageAfterCheck {}
 impl ArtifactCheck for PackageAfterCheck {
     fn artifact_context_check(
         &self,
-        store: &Store,
+        _store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         _artifact_cache: &mut ArtifactCache,

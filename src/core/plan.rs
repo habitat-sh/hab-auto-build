@@ -28,10 +28,9 @@ use crate::{
 };
 
 use super::{
-    ArtifactCache, ArtifactContext, ChangeDetectionMode, Metadata, MinimalArtifactContext,
-    PackageBuildIdent, PackageBuildVersion, PackageDepIdent, PackageIdent, PackageName,
-    PackageOrigin, PackageResolvedDepIdent, PackageSource, PackageTarget, RepoContext,
-    RepoContextID,
+    ArtifactCache, ChangeDetectionMode, Metadata, MinimalArtifactContext, PackageBuildIdent,
+    PackageBuildVersion, PackageDepIdent, PackageIdent, PackageName, PackageOrigin,
+    PackageResolvedDepIdent, PackageSource, PackageTarget, RepoContext, RepoContextID,
 };
 
 lazy_static! {
@@ -222,6 +221,7 @@ pub(crate) enum PlanContextPathGitSyncStatus {
 }
 
 impl PlanContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn read_from_disk(
         connection: Option<&mut SqliteConnection>,
         modification_index: Option<&ModificationIndex>,
@@ -300,7 +300,7 @@ impl PlanContext {
             let mut plan_ctx = PlanContext {
                 id,
                 repo_id: repo_ctx.id.clone(),
-                is_native: repo_ctx.is_native_plan(&plan_ctx_path),
+                is_native: repo_ctx.is_native_plan(plan_ctx_path),
                 context_path: plan_ctx_path.clone(),
                 target_context_last_modified_at: plan_target_ctx_path.last_modifed_at()?,
                 target_context_path: plan_target_ctx_path.clone(),
@@ -315,7 +315,7 @@ impl PlanContext {
                 build_deps: raw_data
                     .build_deps
                     .into_iter()
-                    .chain(raw_data.scaffolding_dep.into_iter())
+                    .chain(raw_data.scaffolding_dep)
                     .map(|d| d.to_resolved_dep_ident(target.to_owned()))
                     .collect(),
                 latest_artifact: None,

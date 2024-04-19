@@ -1,6 +1,5 @@
 use std::{collections::HashSet, fmt::Display, path::PathBuf};
 
-use lazy_static::lazy_static;
 use owo_colors::OwoColorize;
 use path_absolutize::Absolutize;
 use serde::{Deserialize, Serialize};
@@ -349,7 +348,7 @@ pub(crate) struct MachOCheck {}
 impl ArtifactCheck for MachOCheck {
     fn artifact_context_check(
         &self,
-        store: &Store,
+        _store: &Store,
         rules: &PlanContextConfig,
         checker_context: &mut CheckerContext,
         _artifact_cache: &mut ArtifactCache,
@@ -377,7 +376,7 @@ impl ArtifactCheck for MachOCheck {
             })
             .last()
             .expect("Default rule missing");
-        let bad_rpath_entry_options = rules
+        let _bad_rpath_entry_options = rules
             .artifact_rules
             .iter()
             .filter_map(|rule| {

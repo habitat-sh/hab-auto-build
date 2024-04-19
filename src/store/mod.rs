@@ -27,7 +27,7 @@ use diesel::{
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use lazy_static::__Deref;
 use tempdir::TempDir;
-use tracing::{debug, trace};
+use tracing::trace;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.9f";
@@ -218,9 +218,9 @@ impl Store {
     }
 }
 
-pub(crate) struct ModificationIndex(
-    HashMap<PathBuf, HashMap<PathBuf, (DateTime<Utc>, DateTime<Utc>)>>,
-);
+type PathMap = HashMap<PathBuf, (DateTime<Utc>, DateTime<Utc>)>;
+
+pub(crate) struct ModificationIndex(HashMap<PathBuf, PathMap>);
 
 impl ModificationIndex {
     pub(crate) fn file_alternate_modified_at_get(
@@ -246,8 +246,7 @@ pub(crate) fn files_alternate_modified_at_get_full_index(
     connection: &mut SqliteConnection,
 ) -> Result<ModificationIndex> {
     use crate::store::schema::file_modifications::dsl::*;
-    let mut results: HashMap<PathBuf, HashMap<PathBuf, (DateTime<Utc>, DateTime<Utc>)>> =
-        HashMap::new();
+    let mut results: HashMap<PathBuf, PathMap> = HashMap::new();
     let rows = file_modifications.load::<FileModificationRecord>(connection)?;
     for row in rows {
         results
@@ -406,6 +405,7 @@ pub(crate) fn file_alternate_modified_at_get(
         Ok(None)
     }
 }
+
 pub(crate) fn file_alternate_modified_at_put(
     connection: &mut SqliteConnection,
     plan_context_path_value: &PlanContextPath,
@@ -430,10 +430,11 @@ pub(crate) fn file_alternate_modified_at_put(
         .execute(connection)?;
     Ok(())
 }
+
 pub(crate) fn plan_context_alternate_modified_at_delete(
     connection: &mut SqliteConnection,
     plan_context_path_value: &PlanContextPath,
-) -> Result<Option<HashMap<PathBuf, (DateTime<Utc>, DateTime<Utc>)>>> {
+) -> Result<Option<PathMap>> {
     use crate::store::schema::file_modifications::dsl::*;
     let existing_file_modifications = file_modifications
         .filter(plan_context_path.eq(plan_context_path_value.as_ref().to_str().unwrap()))

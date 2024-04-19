@@ -104,7 +104,7 @@ impl SourceContext {
         let file_type = FileKind::detect_from_path(path.as_ref())?;
         let file = BufReader::new(File::open(path.as_ref())?);
         let format;
-        let mut licenses;
+        let licenses;
         match file_type {
             FileKind::Tar => {
                 format = (file_type, None);
@@ -143,7 +143,7 @@ impl SourceContext {
                     licenses = SourceContext::read_licenses_from_archive(Archive::new(decoder))?;
                 }
                 _ => {
-                    format = (file_type, None);
+                    // format = (file_type, None);
                     todo!()
                 }
             },
@@ -158,7 +158,7 @@ impl SourceContext {
                     format = (file_type, Some(FileKind::Tar));
                     licenses = SourceContext::read_licenses_from_archive(Archive::new(decoder))?;
                 } else {
-                    format = (file_type, None);
+                    // format = (file_type, None);
                     todo!()
                 }
             }
@@ -186,7 +186,7 @@ impl SourceContext {
         R: Read,
     {
         let start = Instant::now();
-        let strategy = ScanStrategy::new(&*LICENSE_STORE)
+        let strategy = ScanStrategy::new(&LICENSE_STORE)
             .confidence_threshold(0.8)
             .mode(ScanMode::TopDown)
             .shallow_limit(0.98)
