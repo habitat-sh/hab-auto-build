@@ -439,7 +439,9 @@ impl PlanContext {
                                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                                 DateTime::parse_from_str(stdout.trim(), "%Y-%m-%d %H:%M:%S %z")
                                     .ok()
-                                    .map(|value| DateTime::from_utc(value.naive_utc(), Utc))
+                                    .map(|value| {
+                                        DateTime::from_naive_utc_and_offset(value.naive_utc(), Utc)
+                                    })
                             } else {
                                 None
                             };
@@ -529,7 +531,9 @@ impl PlanContext {
                             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                             DateTime::parse_from_str(stdout.trim(), "%Y-%m-%d %H:%M:%S %z")
                                 .ok()
-                                .map(|value| DateTime::from_utc(value.naive_utc(), Utc))
+                                .map(|value| {
+                                    DateTime::from_naive_utc_and_offset(value.naive_utc(), Utc)
+                                })
                         };
                         if let Some(git_modified_at) = git_modified_at {
                             if git_modified_at != disk_modified_at {

@@ -254,11 +254,11 @@ pub(crate) fn files_alternate_modified_at_get_full_index(
             .or_default()
             .entry(PathBuf::from(row.file_path))
             .or_insert((
-                DateTime::<Utc>::from_utc(
+                DateTime::<Utc>::from_naive_utc_and_offset(
                     NaiveDateTime::parse_from_str(&row.real_modified_at, TIMESTAMP_FORMAT).unwrap(),
                     Utc,
                 ),
-                DateTime::<Utc>::from_utc(
+                DateTime::<Utc>::from_naive_utc_and_offset(
                     NaiveDateTime::parse_from_str(&row.alternate_modified_at, TIMESTAMP_FORMAT)
                         .unwrap(),
                     Utc,
@@ -397,7 +397,7 @@ pub(crate) fn file_alternate_modified_at_get(
         .load::<FileModificationRecord>(connection)?
         .first()
     {
-        Ok(Some(DateTime::<Utc>::from_utc(
+        Ok(Some(DateTime::<Utc>::from_naive_utc_and_offset(
             NaiveDateTime::parse_from_str(&row.alternate_modified_at, TIMESTAMP_FORMAT).unwrap(),
             Utc,
         )))
@@ -446,12 +446,12 @@ pub(crate) fn plan_context_alternate_modified_at_delete(
             (
                 PathBuf::from(row.file_path),
                 (
-                    DateTime::<Utc>::from_utc(
+                    DateTime::<Utc>::from_naive_utc_and_offset(
                         NaiveDateTime::parse_from_str(&row.real_modified_at, TIMESTAMP_FORMAT)
                             .unwrap(),
                         Utc,
                     ),
-                    DateTime::<Utc>::from_utc(
+                    DateTime::<Utc>::from_naive_utc_and_offset(
                         NaiveDateTime::parse_from_str(&row.alternate_modified_at, TIMESTAMP_FORMAT)
                             .unwrap(),
                         Utc,

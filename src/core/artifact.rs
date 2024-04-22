@@ -682,7 +682,7 @@ impl ArtifactContext {
             start.elapsed().as_secs_f32()
         );
         Ok(InnerMinimalArtifactContext {
-            created_at: DateTime::<Utc>::from_utc(
+            created_at: DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::parse_from_str(id.release.to_string().as_str(), "%Y%m%d%H%M%S")
                     .expect("Invalid release value"),
                 Utc,
@@ -1059,7 +1059,7 @@ impl ArtifactContext {
             start.elapsed().as_secs_f32()
         );
         Ok(InnerArtifactContext {
-            created_at: DateTime::<Utc>::from_utc(
+            created_at: DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::parse_from_str(id.release.to_string().as_str(), "%Y%m%d%H%M%S")
                     .expect("Invalid release value"),
                 Utc,

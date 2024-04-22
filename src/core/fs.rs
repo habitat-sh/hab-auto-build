@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use color_eyre::eyre::{eyre, Context, Result};
 use globset::{Glob, GlobSetBuilder};
 use infer::Infer;
@@ -237,14 +237,8 @@ where
     fn last_modifed_at(&self) -> Result<DateTime<Utc>> {
         let modified_at =
             filetime::FileTime::from_last_modification_time(&self.as_ref().metadata()?);
-        Ok(DateTime::<Utc>::from_utc(
-            NaiveDateTime::from_timestamp_opt(
-                modified_at.unix_seconds(),
-                modified_at.nanoseconds(),
-            )
-            .ok_or(eyre!("Last modification timestamp out of range"))?,
-            Utc,
-        ))
+        DateTime::from_timestamp(modified_at.unix_seconds(), modified_at.nanoseconds())
+            .ok_or(eyre!("Last modification timestamp out of range"))
     }
 
     /// Cross platform method to set last modified time for a path
