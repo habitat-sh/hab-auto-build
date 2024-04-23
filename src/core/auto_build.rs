@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Display,
-    fs::File,
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::{mpsc::channel, Arc, RwLock},
     time::Instant,
@@ -364,7 +364,7 @@ impl AutoBuildContext {
         let store_path = if store_path.is_absolute() {
             store_path.clone()
         } else {
-            auto_build_ctx_path.as_ref().join(store_path)
+            fs::canonicalize(auto_build_ctx_path.as_ref().join(store_path))?
         };
         let store = Store::new(&store_path).with_context(|| {
             format!(
