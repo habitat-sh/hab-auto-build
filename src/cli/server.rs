@@ -1,7 +1,6 @@
 use crate::core::{AutoBuildConfig, AutoBuildContext, DepGraphData, ChangeDetectionMode};
 
 use axum::{
-    body::{boxed, Full},
     extract::State,
     handler::HandlerWithoutStateExt,
     http::{header, StatusCode, Uri},
@@ -55,11 +54,9 @@ async fn start(graph: DepGraphData, port: u16) {
     // run our app with hyper
     // `axum::Server` is a re-export of `hyper::Server`
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     tracing::info!("Server started on {}", addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 // basic handler that responds with a static string
@@ -98,24 +95,17 @@ pub struct StaticFile<T>(pub T);
 
 impl<T> IntoResponse for StaticFile<T>
 where
-    T: Into<String>,
+  T: Into<String>,
 {
-    fn into_response(self) -> Response {
-        let path = self.0.into();
+  fn into_response(self) -> Response {
+    let path = self.0.into();
 
-        match Asset::get(path.as_str()) {
-            Some(content) => {
-                let body = boxed(Full::from(content.data));
-                let mime = mime_guess::from_path(path).first_or_octet_stream();
-                Response::builder()
-                    .header(header::CONTENT_TYPE, mime.as_ref())
-                    .body(body)
-                    .unwrap()
-            }
-            None => Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(boxed(Full::from("404")))
-                .unwrap(),
-        }
+    match Asset::get(path.as_str()) {
+      Some(content) => {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+      }
+      None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
     }
+  }
 }
