@@ -141,6 +141,7 @@ impl Dependency {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) struct DependencyArtifactUpdated {
     latest_dep_artifact: PlanContextLatestArtifact,
     latest_plan_artifact: PlanContextLatestArtifact,

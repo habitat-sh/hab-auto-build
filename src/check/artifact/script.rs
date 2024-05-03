@@ -559,20 +559,16 @@ impl ArtifactCheck for ScriptCheck {
                     used_deps.insert(interpreter_artifact_ctx.id.clone());
                     if interpreter_artifact_ctx
                         .elfs
-                        .get(command.as_path())
-                        .is_some()
+                        .contains_key(command.as_path())
                         || interpreter_artifact_ctx
                             .scripts
-                            .get(command.as_path())
-                            .is_some()
+                            .contains_key(command.as_path())
                         || interpreter_artifact_ctx
                             .links
-                            .get(command.as_path())
-                            .is_some()
+                            .contains_key(command.as_path())
                         || interpreter_artifact_ctx
                             .machos
-                            .get(command.as_path())
-                            .is_some()
+                            .contains_key(command.as_path())
                     {
                         let mut interpreter_listed = false;
                         for intermediate in intermediates.iter() {

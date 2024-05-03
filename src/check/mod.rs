@@ -528,6 +528,7 @@ pub(crate) trait SourceCheck {
         plan_context: &PlanContext,
         source_context: &SourceContext,
     ) -> Vec<LeveledSourceCheckViolation>;
+    #[allow(dead_code)]
     fn source_context_check_with_artifact(
         &self,
         plan_config: &PlanContextConfig,

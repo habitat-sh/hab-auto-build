@@ -1185,7 +1185,7 @@ impl ArtifactContext {
                 };
                 if let Some(next_artifact_ctx) = link.package_ident(artifact_ctx.target) {
                     if next_artifact_ctx == artifact_ctx.id
-                        && artifact_ctx.links.get(&link).is_none()
+                        && !artifact_ctx.links.contains_key(&link)
                     {
                         resolved_path = link.to_path_buf();
                         current_artifact = None;
@@ -1262,7 +1262,7 @@ impl ArtifactContext {
                 };
                 if let Some(next_artifact_ctx) = link.package_ident(artifact_ctx.target) {
                     if next_artifact_ctx == artifact_ctx.id
-                        && artifact_ctx.links.get(&link).is_none()
+                        && !artifact_ctx.links.contains_key(&link)
                     {
                         resolved_path = link.to_path_buf();
                         intermediate_paths.push(resolved_path.clone());

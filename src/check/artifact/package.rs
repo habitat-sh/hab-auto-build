@@ -524,7 +524,7 @@ impl ArtifactCheck for PackageBeforeCheck {
             .iter()
             .filter_map(|search_path| {
                 if let Some(dep_ident) = search_path.package_ident(artifact_context.target) {
-                    if tdep_artifacts.get(&dep_ident).is_some() {
+                    if tdep_artifacts.contains_key(&dep_ident) {
                         let artifact_ctx = artifact_cache.artifact(&dep_ident).unwrap();
                         if let Some(artifact_ctx) = &artifact_ctx {
                             for (elf_path, elf_metadata) in &artifact_ctx.elfs {

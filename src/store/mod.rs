@@ -126,6 +126,7 @@ impl AsRef<Path> for InvalidPackageSourceArchiveStorePath {
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[allow(dead_code)]
 pub(crate) struct PackageSourceLicenseStorePath(PathBuf);
 
 impl AsRef<Path> for PackageSourceLicenseStorePath {
