@@ -19,7 +19,7 @@ use color_eyre::{
 };
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
-use toml_edit::{Array, Document, Formatted, InlineTable, Value};
+use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Value};
 use tracing::debug;
 
 #[cfg(target_os = "linux")]
@@ -78,8 +78,8 @@ impl PlanContextConfig {
     }
 
     pub fn from_str(value: &str, target: PackageTarget) -> Result<PlanContextConfig> {
-        let document = value.parse::<Document>()?;
-        let mut restructured_document = Document::new();
+        let document = value.parse::<DocumentMut>()?;
+        let mut restructured_document = DocumentMut::new();
         let mut restructured_rules = Array::default();
         let rule_sets = [
             document.get("rules"),
