@@ -559,21 +559,21 @@ impl ArtifactCheck for MachOCheck {
                                                     {
                                                         violations
                                                         .push(LeveledArtifactCheckViolation {
-                                                        level: bad_library_dependency_options.level,
-                                                        violation: ArtifactCheckViolation::MachO(
-                                                            MachORule::BadLibraryDependency(
-                                                                BadLibraryDependency {
-                                                                    source: macho_path.clone(),
-                                                                    library:
-                                                                        library
-                                                                            .clone(),
-                                                                    library_path: library_path.clone(),
-                                                                    macho_type: dep_arch_metadata
-                                                                        .file_type,
-                                                                },
+                                                            level: bad_library_dependency_options.level,
+                                                            violation: ArtifactCheckViolation::MachO(
+                                                                MachORule::BadLibraryDependency(
+                                                                    BadLibraryDependency {
+                                                                        source: macho_path.clone(),
+                                                                        library:
+                                                                            library
+                                                                                .clone(),
+                                                                        library_path: library_path.clone(),
+                                                                        macho_type: dep_arch_metadata
+                                                                            .file_type,
+                                                                    },
+                                                                ),
                                                             ),
-                                                        ),
-                                                    });
+                                                        });
                                                     }
                                                 }
                                             }
