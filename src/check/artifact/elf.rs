@@ -935,10 +935,8 @@ impl ArtifactCheck for ElfCheck {
                     {
                         if let Some(interpreter_artifact_ctx) = tdep_artifacts.get(&interpreter_dep)
                         {
-                            if interpreter_artifact_ctx
-                                .elfs
-                                .get(interpreter_path.as_path())
-                                .is_none()
+                            if !interpreter_artifact_ctx
+                                .elfs.contains_key(interpreter_path.as_path())
                             {
                                 let resolved_interpreter_path = interpreter_artifact_ctx
                                     .resolve_path(tdep_artifacts, interpreter_path.as_path());
