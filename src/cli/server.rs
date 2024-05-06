@@ -1,4 +1,4 @@
-use crate::core::{AutoBuildConfig, AutoBuildContext, DepGraphData, ChangeDetectionMode};
+use crate::core::{AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, DepGraphData};
 
 use axum::{
     extract::State,
@@ -10,7 +10,6 @@ use axum::{
 };
 use clap::Args;
 use color_eyre::eyre::{eyre, Context, Result};
-use petgraph::visit::EdgeRef;
 use rust_embed::RustEmbed;
 use serde_json::Value;
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -83,6 +82,7 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
 }
 
 // Finally, we use a fallback route for anything that didn't match.
+#[allow(dead_code)]
 async fn not_found() -> Html<&'static str> {
     Html("<h1>404</h1><p>Not Found</p>")
 }
@@ -95,17 +95,17 @@ pub struct StaticFile<T>(pub T);
 
 impl<T> IntoResponse for StaticFile<T>
 where
-  T: Into<String>,
+    T: Into<String>,
 {
-  fn into_response(self) -> Response {
-    let path = self.0.into();
+    fn into_response(self) -> Response {
+        let path = self.0.into();
 
-    match Asset::get(path.as_str()) {
-      Some(content) => {
-        let mime = mime_guess::from_path(path).first_or_octet_stream();
-        ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
-      }
-      None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
+        match Asset::get(path.as_str()) {
+            Some(content) => {
+                let mime = mime_guess::from_path(path).first_or_octet_stream();
+                ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+            }
+            None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
+        }
     }
-  }
 }

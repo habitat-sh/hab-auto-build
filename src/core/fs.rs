@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use color_eyre::eyre::{eyre, Context, Result};
 use globset::{Glob, GlobSetBuilder};
 use infer::Infer;
@@ -62,7 +62,8 @@ impl FileKind {
                 .unwrap_or("unknown"),
         )
     }
-    pub fn detect_from_reader<'a>(mut reader: impl Read) -> FileKind {
+
+    pub fn detect_from_reader(mut reader: impl Read) -> FileKind {
         let mut buffer = [0u8; 1024];
         let mut data = Vec::new();
         while let Ok(n) = reader.read(&mut buffer) {
@@ -185,24 +186,15 @@ impl AsRef<Path> for HabitatRootPath {
 
 pub mod file_types {
     pub fn script_matcher(buf: &[u8]) -> bool {
-        return buf.len() >= 2 && buf[0] == 0x23 && buf[1] == 0x21;
+        buf.len() >= 2 && buf[0] == 0x23 && buf[1] == 0x21
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 #[serde(try_from = "Vec<String>", into = "Vec<String>")]
 pub struct GlobSetExpression {
     pub patterns: Vec<String>,
     globset: globset::GlobSet,
-}
-
-impl Default for GlobSetExpression {
-    fn default() -> Self {
-        Self {
-            patterns: Default::default(),
-            globset: Default::default(),
-        }
-    }
 }
 
 impl GlobSetExpression {
@@ -226,9 +218,9 @@ impl TryFrom<Vec<String>> for GlobSetExpression {
     }
 }
 
-impl Into<Vec<String>> for GlobSetExpression {
-    fn into(self) -> Vec<String> {
-        self.patterns
+impl From<GlobSetExpression> for Vec<String> {
+    fn from(val: GlobSetExpression) -> Self {
+        val.patterns
     }
 }
 
@@ -245,14 +237,8 @@ where
     fn last_modifed_at(&self) -> Result<DateTime<Utc>> {
         let modified_at =
             filetime::FileTime::from_last_modification_time(&self.as_ref().metadata()?);
-        Ok(DateTime::<Utc>::from_utc(
-            NaiveDateTime::from_timestamp_opt(
-                modified_at.unix_seconds(),
-                modified_at.nanoseconds(),
-            )
-            .ok_or(eyre!("Last modification timestamp out of range"))?,
-            Utc,
-        ))
+        DateTime::from_timestamp(modified_at.unix_seconds(), modified_at.nanoseconds())
+            .ok_or(eyre!("Last modification timestamp out of range"))
     }
 
     /// Cross platform method to set last modified time for a path

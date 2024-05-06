@@ -5,7 +5,8 @@ use owo_colors::OwoColorize;
 use tracing::{error, info};
 
 use crate::core::{
-    AutoBuildConfig, AutoBuildContext, PackageDepGlob, PackageTarget, PlanContextPathGitSyncStatus, ChangeDetectionMode,
+    AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, PackageDepGlob, PackageTarget,
+    PlanContextPathGitSyncStatus,
 };
 use color_eyre::eyre::{eyre, Context, Result};
 
@@ -36,7 +37,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         .packages
         .clone()
         .unwrap_or(vec![PackageDepGlob::parse("*/*").unwrap()]);
-    let package_indices = run_context.glob_deps(&packages, PackageTarget::default())?;
+    let package_indices = run_context.glob_deps(packages, PackageTarget::default())?;
     if package_indices.is_empty() && !run_context.is_empty() {
         error!(target: "user-log",
             "No packages found matching patterns: {}",

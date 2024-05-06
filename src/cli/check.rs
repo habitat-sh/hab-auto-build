@@ -1,19 +1,15 @@
 use clap::Args;
 use color_eyre::eyre::{eyre, Context, Result};
 use owo_colors::OwoColorize;
-use std::{
-    env,
-    fmt::Write,
-    path::{Path, PathBuf}, time::Instant,
-};
+use std::{env, fmt::Write, path::PathBuf, time::Instant};
 use tracing::{error, info};
 
 use crate::{
     check::{LeveledArtifactCheckViolation, LeveledSourceCheckViolation, ViolationLevel},
     cli::output::OutputFormat,
     core::{
-        AutoBuildConfig, AutoBuildContext, BuildPlan, PackageDepGlob, PackageTarget,
-        PlanCheckStatus, ChangeDetectionMode,
+        AutoBuildConfig, AutoBuildContext, BuildPlan, ChangeDetectionMode, PackageDepGlob,
+        PackageTarget, PlanCheckStatus,
     },
 };
 
@@ -135,7 +131,7 @@ pub(crate) fn output_violations(
             write!(
                 &mut header,
                 "{}",
-                format!(" all checks passed").green().bold()
+                " all checks passed".to_string().green().bold()
             )?;
         }
         info!(target: "user-ui", "{}", header);
@@ -165,10 +161,12 @@ pub(crate) fn output_violations(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn output_plain(_dry_run: BuildPlan) -> Result<()> {
     todo!()
 }
 
+#[allow(dead_code)]
 fn output_json(_dry_run: BuildPlan) -> Result<()> {
     todo!()
 }

@@ -9,7 +9,8 @@ use reqwest::{
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf}, time::Instant,
+    path::{Path, PathBuf},
+    time::Instant,
 };
 use suppaftp::FtpStream;
 use tracing::{debug, log::error};
@@ -163,9 +164,7 @@ impl Download {
 
         // Test if the server responds correctly to range requests
         let mut request = reqwest::blocking::Request::new(Method::GET, url.clone());
-        request
-            .headers_mut()
-            .extend(base_headers.clone().into_iter());
+        request.headers_mut().extend(base_headers.clone());
         request
             .headers_mut()
             .insert(header::RANGE, "bytes=0-0".parse().unwrap());
@@ -217,9 +216,8 @@ impl Download {
                                         .parse()
                                         .unwrap(),
                                 );
-                                let mut file_range_res =
-                                    Download::execute_request(&client, request)
-                                        .expect("Failed to send request to download file");
+                                let mut file_range_res = Download::execute_request(client, request)
+                                    .expect("Failed to send request to download file");
                                 for _ in 0..buffer_chunks {
                                     let mut buffer = vec![0u8; *DOWNLOAD_MEMORY_BUFFER as usize];
                                     let range = file_range_res.by_ref();
@@ -255,7 +253,7 @@ impl Download {
                 let start = Instant::now();
                 debug!("Starting single-threaded download of file from {}", url);
                 let mut request = reqwest::blocking::Request::new(Method::GET, url.clone());
-                request.headers_mut().extend(base_headers.into_iter());
+                request.headers_mut().extend(base_headers);
                 let response = Download::execute_request(&client, request)?;
                 let mut file = File::create(self.filename)?;
                 file.write_all(&response.bytes()?)?;

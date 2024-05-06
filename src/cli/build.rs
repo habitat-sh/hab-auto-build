@@ -190,7 +190,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
         }
         for step in build_plan.build_steps {
             info!(target: "user-ui", "{} [{}] {}", "     Building".green().bold(), step.studio, step.plan_ctx.id);
-            match run_context.download_plan_source(&step.plan_ctx, true)? {
+            match run_context.download_plan_source(step.plan_ctx, true)? {
                 DownloadStatus::Downloaded(_source_ctx, _, _, _, source_violations)
                 | DownloadStatus::AlreadyDownloaded(_source_ctx, _, _, source_violations) => {
                     let source_warnings = source_violations

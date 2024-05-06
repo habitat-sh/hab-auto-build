@@ -758,7 +758,7 @@ impl PackageDepGlob {
             if version.is_empty() {
                 return Err(eyre!("Package version pattern is empty"));
             }
-            if let Err(err) = Glob::new(&version) {
+            if let Err(err) = Glob::new(version) {
                 return Err(eyre!("Package version pattern is invalid: {}", err));
             }
         }
@@ -767,7 +767,7 @@ impl PackageDepGlob {
             if release.is_empty() {
                 return Err(eyre!("Package release pattern is empty"));
             }
-            if let Err(err) = Glob::new(&release) {
+            if let Err(err) = Glob::new(release) {
                 return Err(eyre!("Package release pattern is invalid: {}", err));
             }
         }

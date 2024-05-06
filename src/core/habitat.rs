@@ -38,7 +38,7 @@ lazy_static! {
         );
         let sdk_libs_path = sdk_path.join("usr").join("lib");
         let mut system_libs = Vec::new();
-        for entry in std::fs::read_dir(&sdk_libs_path).unwrap() {
+        for entry in std::fs::read_dir(sdk_libs_path).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
             if let Some(extension) = path.extension() {
@@ -61,8 +61,12 @@ lazy_static! {
     static ref HAB_BINARY: PathBuf =
         which("hab").expect("Failed to find hab binary in environment");
 }
+
+#[allow(dead_code)]
 const MACOS_CPU_TYPE: u32 = 16777228;
+#[allow(dead_code)]
 const MACOS_CPU_SUBTYPE: u32 = 2;
+#[allow(dead_code)]
 const SANDBOX_DEFAULTS: &str = include_str!("../scripts/sandbox-defaults.sb");
 
 pub(crate) fn install_artifact_offline(package_ident: &PackageIdent) -> Result<()> {
@@ -108,7 +112,7 @@ fn copy_source_to_cache(
                 source_cache_folder.as_ref().display()
             )
         })?;
-        let store_archive = store.package_source_store_path(&source).archive_data_path();
+        let store_archive = store.package_source_store_path(source).archive_data_path();
         let source_cache_path = source_cache_folder.as_ref().join(source.url.filename()?);
         if !source_cache_path.exists() {
             trace!(
@@ -155,7 +159,6 @@ fn copy_build_success_output(
     })?;
     let artifact_name = last_build
         .lines()
-        .into_iter()
         .filter_map(|l| l.strip_prefix("pkg_artifact="))
         .next()
         .unwrap()
@@ -225,12 +228,11 @@ fn copy_build_failure_output(
     }) {
         Ok(pre_build) => pre_build
             .lines()
-            .into_iter()
             .filter_map(|l| l.strip_prefix("pkg_ident="))
             .next()
             .unwrap()
             .trim()
-            .replace("/", "-"),
+            .replace('/', "-"),
         Err(err) => {
             debug!("Failed to find pre_build file: {:#}", err);
             let build_id = build_step.plan_ctx.id.as_ref();
@@ -308,7 +310,7 @@ pub(crate) fn native_package_build(
         )
     })?;
 
-    let build_log_path = tmp_dir.path().join(format!("build.log"));
+    let build_log_path = tmp_dir.path().join("build.log");
     let build_log = std::fs::File::create(&build_log_path).with_context(|| {
         format!(
             "Failed to create build log at '{}'",
@@ -365,7 +367,7 @@ pub(crate) fn native_package_build(
             ));
         if let Some(source) = &build_step.plan_ctx.source {
             let source_cache_folder = HabitatRootPath::default().source_cache();
-            let store_archive = store.package_source_store_path(&source).archive_data_path();
+            let store_archive = store.package_source_store_path(source).archive_data_path();
             let source_cache_path = source_cache_folder.as_ref().join(source.url.filename()?);
             cmd = cmd.arg("-v").arg(format!(
                 "{}:{}",
@@ -382,9 +384,9 @@ pub(crate) fn native_package_build(
             .arg("-v")
             .arg(format!("{}:/output", build_output_dir.display()))
             .arg("-v")
-            .arg(format!("/hab/cache/artifacts:/hab/cache/artifacts"))
+            .arg("/hab/cache/artifacts:/hab/cache/artifacts")
             .arg("-v")
-            .arg(format!("/hab/cache/keys:/hab/cache/keys"))
+            .arg("/hab/cache/keys:/hab/cache/keys")
             .arg("--workdir")
             .arg("/src")
             .arg("-e")
@@ -403,10 +405,7 @@ pub(crate) fn native_package_build(
                 build_step.plan_ctx.id.as_ref().origin
             ))
             .arg("-e")
-            .arg(format!(
-                "BUILD_PKG_TARGET={}",
-                PackageTarget::default().to_string()
-            ))
+            .arg(format!("BUILD_PKG_TARGET={}", PackageTarget::default()))
             .arg(docker_image)
             .arg("build")
             .arg(relative_plan_context)
@@ -478,6 +477,7 @@ pub(crate) fn native_package_build(
     }
 }
 
+#[allow(dead_code)]
 fn compute_binary_impurities(binary_path: impl AsRef<Path>) -> Result<BTreeSet<PathBuf>> {
     let mut impure_paths = BTreeSet::new();
     let mut unvisted_paths = VecDeque::new();
@@ -538,6 +538,7 @@ fn compute_binary_impurities(binary_path: impl AsRef<Path>) -> Result<BTreeSet<P
     Ok(impure_paths)
 }
 
+#[allow(dead_code)]
 fn build_sandbox_profile(tmp_dir: impl AsRef<Path>) -> Result<PathBuf> {
     let sandbox_profile_path = tmp_dir.as_ref().join("sandbox-profile.sb");
     let mut sandbox_profile = String::new();
@@ -569,7 +570,7 @@ fn build_sandbox_profile(tmp_dir: impl AsRef<Path>) -> Result<PathBuf> {
 #[cfg(target_os = "macos")]
 pub(crate) fn native_package_build(
     build_step: &BuildStep,
-    artifact_cache: &ArtifactCache,
+    _artifact_cache: &ArtifactCache,
     store: &Store,
 ) -> Result<BuildOutput, BuildError> {
     let tmp_path = store.temp_dir_path();
@@ -581,7 +582,7 @@ pub(crate) fn native_package_build(
         )
     })?;
 
-    let build_log_path = tmp_dir.path().join(format!("build.log"));
+    let build_log_path = tmp_dir.path().join("build.log");
     let build_log = std::fs::File::create(&build_log_path).with_context(|| {
         format!(
             "Failed to create build log at '{}'",
@@ -597,7 +598,6 @@ pub(crate) fn native_package_build(
         .unwrap();
 
     let mut cmd;
-    let mut exit_status;
 
     debug!(
         "Starting build of native package {}, logging output to {}",
@@ -648,7 +648,7 @@ pub(crate) fn native_package_build(
         cmd = cmd.env("HAB_BLDR_URL", "https://non-existent");
     }
     trace!("Executing command: {:?}", cmd);
-    exit_status = cmd.join()?;
+    let exit_status = cmd.join()?;
 
     if exit_status.success() {
         let (artifact_path, build_log_path) =
@@ -689,7 +689,7 @@ pub(crate) fn bootstrap_package_build(
             tmp_path.as_ref().display()
         )
     })?;
-    let build_log_path = tmp_dir.path().join(format!("build.log"));
+    let build_log_path = tmp_dir.path().join("build.log");
     let build_log = std::fs::File::create(&build_log_path).with_context(|| {
         format!(
             "Failed to create build log at '{}'",
@@ -870,8 +870,8 @@ pub(crate) fn bootstrap_package_build(
             tmp_path.as_ref().display()
         )
     })?;
-    let build_log_path = tmp_dir.path().join(format!("build.log"));
-    let build_log = std::fs::File::create(&build_log_path).with_context(|| {
+    let build_log_path = tmp_dir.path().join("build.log");
+    let _build_log = std::fs::File::create(&build_log_path).with_context(|| {
         format!(
             "Failed to create build log at '{}'",
             build_log_path.display()
@@ -985,7 +985,7 @@ pub(crate) fn bootstrap_package_build(
     let exit_status = cmd.join()?;
     if exit_status.success() {
         let (artifact_path, build_log_path) =
-            copy_build_success_output(store, build_step, &build_log_path, &build_output_dir)?;
+            copy_build_success_output(store, build_step, &build_log_path, build_output_dir)?;
         Ok(BuildOutput {
             artifact: ArtifactContext::read_from_disk(artifact_path.as_path(), None).with_context(
                 || {
@@ -999,7 +999,7 @@ pub(crate) fn bootstrap_package_build(
         })
     } else {
         let build_log_path =
-            copy_build_failure_output(store, build_step, &build_log_path, &build_output_dir)?;
+            copy_build_failure_output(store, build_step, &build_log_path, build_output_dir)?;
         Err(BuildError::Bootstrap(
             build_step.plan_ctx.id.clone(),
             build_log_path,
@@ -1021,7 +1021,7 @@ pub(crate) fn standard_package_build(
             tmp_path.as_ref().display()
         )
     })?;
-    let build_log_path = tmp_dir.path().join(format!("build.log"));
+    let build_log_path = tmp_dir.path().join("build.log");
     let build_log = std::fs::File::create(&build_log_path).with_context(|| {
         format!(
             "Failed to create build log at '{}'",

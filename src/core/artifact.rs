@@ -3,14 +3,14 @@ use color_eyre::{
     eyre::{eyre, Context, Result},
     Help, SectionExt,
 };
-use diesel::{Connection, SqliteConnection};
+use diesel::Connection;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use goblin::{
     elf64::{
         dynamic::DF_1_PIE,
         header::{ET_DYN, ET_EXEC},
     },
-    mach::{load_command::CommandVariant, Mach, SingleArch},
+    mach::{Mach, SingleArch},
     Object,
 };
 use ignore::{ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
@@ -19,7 +19,6 @@ use path_absolutize::Absolutize;
 use rayon::prelude::*;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use sha2::digest::block_buffer::Lazy;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
@@ -99,7 +98,7 @@ impl Default for ArtifactCachePath {
     fn default() -> Self {
         ArtifactCachePath(
             FSRootPath::default().as_ref().join(
-                &["hab", "cache", "artifacts"]
+                ["hab", "cache", "artifacts"]
                     .into_iter()
                     .collect::<PathBuf>(),
             ),
@@ -151,7 +150,7 @@ pub(crate) struct ArtifactCache {
 impl ArtifactCache {
     pub fn new(artifact_cache_path: ArtifactCachePath, store: &Store) -> Result<ArtifactCache> {
         let start = Instant::now();
-        let mut artifact_cache = ArtifactCache {
+        let artifact_cache = ArtifactCache {
             path: artifact_cache_path,
             known_artifacts: Arc::new(RwLock::new(ArtifactList::default())),
             store: store.clone(),
@@ -166,7 +165,7 @@ impl ArtifactCache {
 
             while let Ok(artifact_ctx) = receiver.recv() {
                 known_artifact_count += 1;
-                artifact_cache.artifact_add(store.into(), artifact_ctx)?;
+                artifact_cache.artifact_add(store, artifact_ctx)?;
             }
             artifact_indexer_thread
                 .join()
@@ -183,7 +182,7 @@ impl ArtifactCache {
 
     pub fn artifact_add(
         &self,
-        store: &Store,
+        _store: &Store,
         artifact_ctx: LazyArtifactContext,
     ) -> Result<PackageIdent> {
         let mut known_artifacts = self.known_artifacts.write().unwrap();
@@ -199,7 +198,7 @@ impl ArtifactCache {
 
     fn store_artifact(
         &self,
-        known_artifacts: &mut RwLockWriteGuard<'_, ArtifactList>, // we take reference to the write lock so we can gaurantee that there is no other modification in flight
+        _known_artifacts: &mut RwLockWriteGuard<'_, ArtifactList>, // we take reference to the write lock so we can gaurantee that there is no other modification in flight
         artifact_ctx: &ArtifactContext,
     ) -> Result<()> {
         self.store
@@ -245,9 +244,9 @@ impl ArtifactCache {
             .and_then(|a| a.get(&build_ident.target))
             .and_then(|a| match &build_ident.version {
                 PackageBuildVersion::Static(version) => a.get(version),
-                PackageBuildVersion::Dynamic => a.values().rev().next(),
+                PackageBuildVersion::Dynamic => a.values().next_back(),
             })
-            .and_then(|a| a.values().rev().next())
+            .and_then(|a| a.values().next_back())
             .map(|a| match a {
                 LazyArtifactContext::NotLoaded(a) => a.clone(),
                 LazyArtifactContext::Loaded(a) => MinimalArtifactContext::from(a),
@@ -268,9 +267,9 @@ impl ArtifactCache {
             .and_then(|a| a.get(&build_ident.target))
             .and_then(|a| match &build_ident.version {
                 PackageBuildVersion::Static(version) => a.get(version),
-                PackageBuildVersion::Dynamic => a.values().rev().next(),
+                PackageBuildVersion::Dynamic => a.values().next_back(),
             })
-            .and_then(|a| a.values().rev().next())
+            .and_then(|a| a.values().next_back())
             .cloned();
         self.load_lazy_artifact(lazy_artifact)
     }
@@ -287,11 +286,11 @@ impl ArtifactCache {
             .and_then(|a| a.get(&dep_ident.target))
             .and_then(|a| match &dep_ident.version {
                 PackageVersion::Resolved(version) => a.get(version),
-                PackageVersion::Unresolved => a.values().rev().next(),
+                PackageVersion::Unresolved => a.values().next_back(),
             })
             .and_then(|a| match &dep_ident.release {
                 PackageRelease::Resolved(release) => a.get(release),
-                PackageRelease::Unresolved => a.values().rev().next(),
+                PackageRelease::Unresolved => a.values().next_back(),
             })
             .map(|a| match a {
                 LazyArtifactContext::NotLoaded(a) => a.clone(),
@@ -312,16 +311,17 @@ impl ArtifactCache {
             .and_then(|a| a.get(&dep_ident.target))
             .and_then(|a| match &dep_ident.version {
                 PackageVersion::Resolved(version) => a.get(version),
-                PackageVersion::Unresolved => a.values().rev().next(),
+                PackageVersion::Unresolved => a.values().next_back(),
             })
             .and_then(|a| match &dep_ident.release {
                 PackageRelease::Resolved(release) => a.get(release),
-                PackageRelease::Unresolved => a.values().rev().next(),
+                PackageRelease::Unresolved => a.values().next_back(),
             })
             .cloned();
         self.load_lazy_artifact(lazy_artifact)
     }
 
+    #[allow(dead_code)]
     pub fn minimal_artifact(&self, dep_ident: &PackageIdent) -> Option<MinimalArtifactContext> {
         self.known_artifacts
             .read()
@@ -584,7 +584,7 @@ impl From<&ArtifactContext> for MinimalArtifactContext {
     fn from(artifact_ctx: &ArtifactContext) -> Self {
         InnerMinimalArtifactContext {
             id: artifact_ctx.id.clone(),
-            created_at: artifact_ctx.created_at.clone(),
+            created_at: artifact_ctx.created_at,
             path: None,
         }
         .into()
@@ -614,7 +614,7 @@ enum IndexedArtifactItem {
 impl ArtifactContext {
     pub fn lazy_read_from_disk(
         artifact_path: impl AsRef<Path>,
-        hash: Option<&Blake3>,
+        _hash: Option<&Blake3>,
     ) -> Result<MinimalArtifactContext> {
         let start = Instant::now();
         let f = std::fs::File::open(artifact_path.as_ref())?;
@@ -651,14 +651,14 @@ impl ArtifactContext {
         let mut tar = Archive::new(decoder);
 
         let mut id = None;
-        let mut target = artifact_path
+        let target = artifact_path
             .as_ref()
             .file_stem()
             .and_then(|v| v.to_str())
             .map(|v| {
                 let mut iter = v.rsplitn(3, '-');
-                let os = iter.next().map(|v| PackageOS::parse(v)).transpose()?;
-                let arch = iter.next().map(|v| PackageArch::parse(v)).transpose()?;
+                let os = iter.next().map(PackageOS::parse).transpose()?;
+                let arch = iter.next().map(PackageArch::parse).transpose()?;
                 Ok::<PackageTarget, color_eyre::eyre::Error>(PackageTarget {
                     arch: arch.ok_or(eyre!("Invalid artifact target architecture"))?,
                     os: os.ok_or(eyre!("Invalid artifact target os"))?,
@@ -667,12 +667,11 @@ impl ArtifactContext {
             .transpose()?
             .ok_or(eyre!("Invalid artifact name"))?;
 
-        for entry in tar.entries()? {
-            let mut entry = entry?;
+        if let Some(entry) = (tar.entries()?).next() {
+            let entry = entry?;
             let path = entry.path()?;
 
             id = path.package_ident(target);
-            break;
         }
 
         let id = id.ok_or(eyre!("Package artifact malformed"))?;
@@ -683,7 +682,7 @@ impl ArtifactContext {
             start.elapsed().as_secs_f32()
         );
         Ok(InnerMinimalArtifactContext {
-            created_at: DateTime::<Utc>::from_utc(
+            created_at: DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::parse_from_str(id.release.to_string().as_str(), "%Y%m%d%H%M%S")
                     .expect("Invalid release value"),
                 Utc,
@@ -810,24 +809,22 @@ impl ArtifactContext {
                 if !matches.is_empty() {
                     let mut data = String::new();
                     entry.read_to_string(&mut data)?;
-                    return Ok::<_, color_eyre::eyre::Error>(Some(RawArtifactItem::MetaFile(
+                    Ok::<_, color_eyre::eyre::Error>(Some(RawArtifactItem::MetaFile(
                         file_name.to_string(),
                         data,
-                    )));
+                    )))
+                } else if let Some((kind, data)) = FileKind::maybe_read_file(
+                    entry,
+                    &[FileKind::Elf, FileKind::Script, FileKind::MachBinary],
+                ) {
+                    Ok::<_, color_eyre::eyre::Error>(Some(RawArtifactItem::Resource(
+                        entry_install_path,
+                        file_mode,
+                        kind,
+                        data,
+                    )))
                 } else {
-                    if let Some((kind, data)) = FileKind::maybe_read_file(
-                        entry,
-                        &[FileKind::Elf, FileKind::Script, FileKind::MachBinary],
-                    ) {
-                        return Ok::<_, color_eyre::eyre::Error>(Some(RawArtifactItem::Resource(
-                            entry_install_path,
-                            file_mode,
-                            kind,
-                            data,
-                        )));
-                    } else {
-                        return Ok::<_, color_eyre::eyre::Error>(None);
-                    }
+                    Ok::<_, color_eyre::eyre::Error>(None)
                 }
             })
             .collect::<Vec<_>>()
@@ -887,9 +884,8 @@ impl ArtifactContext {
                                     for line in data.lines() {
                                         if let Some(value) = line.strip_prefix("* __Target__:") {
                                             let patterns: &[_] = &[' ', '`', '\n'];
-                                            if let Some(target) =
+                                            if let Ok(target) =
                                                 PackageTarget::parse(value.trim_matches(patterns))
-                                                    .ok()
                                             {
                                                 result.push(IndexedArtifactItem::PackageTarget(
                                                     target,
@@ -911,7 +907,7 @@ impl ArtifactContext {
                                                 Some(value.trim_matches(patterns).to_owned());
                                         }
                                         if plan_source_header_read {
-                                            plan_source.push_str(&line);
+                                            plan_source.push_str(line);
                                             plan_source.push('\n');
                                         }
                                         if line.starts_with("## Plan Source") {
@@ -946,8 +942,8 @@ impl ArtifactContext {
                                 }
                             })
                         }
-                        RawArtifactItem::Resource(path, file_mode, kind, data) => Ok(
-                            match Resource::from_data(&path, file_mode, kind, data) {
+                        RawArtifactItem::Resource(path, file_mode, kind, data) => {
+                            Ok(match Resource::from_data(&path, file_mode, kind, data) {
                                 Err(err) => {
                                     error!(
                                         "Failed to read {} detected as {:?} resource: {:?}",
@@ -957,24 +953,22 @@ impl ArtifactContext {
                                     );
                                     vec![]
                                 }
-                                Ok(resource) => {
-                                    match resource {
-                                        Resource::Elf(metadata) => {
-                                            vec![IndexedArtifactItem::Elf((path, metadata))]
-                                        }
-                                        Resource::Script(metadata) => {
-                                            vec![IndexedArtifactItem::Script((path, metadata))]
-                                        }
-                                        Resource::MachO(metadata) => {
-                                            vec![IndexedArtifactItem::MachO((path, metadata))]
-                                        }
-                                        _ => {
-                                            vec![]
-                                        }
+                                Ok(resource) => match resource {
+                                    Resource::Elf(metadata) => {
+                                        vec![IndexedArtifactItem::Elf((path, metadata))]
                                     }
-                                }       
-                            }
-                        ),
+                                    Resource::Script(metadata) => {
+                                        vec![IndexedArtifactItem::Script((path, metadata))]
+                                    }
+                                    Resource::MachO(metadata) => {
+                                        vec![IndexedArtifactItem::MachO((path, metadata))]
+                                    }
+                                    _ => {
+                                        vec![]
+                                    }
+                                },
+                            })
+                        }
                     }
                 } else {
                     Ok(vec![])
@@ -1065,7 +1059,7 @@ impl ArtifactContext {
             start.elapsed().as_secs_f32()
         );
         Ok(InnerArtifactContext {
-            created_at: DateTime::<Utc>::from_utc(
+            created_at: DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::parse_from_str(id.release.to_string().as_str(), "%Y%m%d%H%M%S")
                     .expect("Invalid release value"),
                 Utc,
@@ -1191,7 +1185,7 @@ impl ArtifactContext {
                 };
                 if let Some(next_artifact_ctx) = link.package_ident(artifact_ctx.target) {
                     if next_artifact_ctx == artifact_ctx.id
-                        && artifact_ctx.links.get(&link).is_none()
+                        && !artifact_ctx.links.contains_key(&link)
                     {
                         resolved_path = link.to_path_buf();
                         current_artifact = None;
@@ -1268,7 +1262,7 @@ impl ArtifactContext {
                 };
                 if let Some(next_artifact_ctx) = link.package_ident(artifact_ctx.target) {
                     if next_artifact_ctx == artifact_ctx.id
-                        && artifact_ctx.links.get(&link).is_none()
+                        && !artifact_ctx.links.contains_key(&link)
                     {
                         resolved_path = link.to_path_buf();
                         intermediate_paths.push(resolved_path.clone());
@@ -1495,7 +1489,7 @@ impl Resource {
                         let mut metadata = MachOMetadata { archs: Vec::new() };
                         match macho {
                             Mach::Fat(macho) => {
-                                for index in (0..macho.narches) {
+                                for index in 0..macho.narches {
                                     match macho.get(index) {
                                         Ok(SingleArch::MachO(macho)) => {
                                             metadata.archs.push(SingleArchMachOMetadata {
@@ -1517,7 +1511,7 @@ impl Resource {
                                                 file_type: MachOType::from(macho.header.filetype),
                                             });
                                         }
-                                        Ok(SingleArch::Archive(archive)) => {}
+                                        Ok(SingleArch::Archive(_archive)) => {}
                                         Err(goblin::error::Error::Malformed(_)) => {
                                             // MachBinaries and JavaClasses unfortunately share the same magic bytes. We can only know for sure
                                             // by attempting to parse the object once

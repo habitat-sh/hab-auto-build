@@ -10,8 +10,8 @@ use clap::Args;
 use crate::{
     cli::output::OutputFormat,
     core::{
-        AnalysisType, AutoBuildConfig, AutoBuildContext, Dependency, DependencyAnalysis,
-        PackageDepGlob, PackageTarget, ChangeDetectionMode,
+        AnalysisType, AutoBuildConfig, AutoBuildContext, ChangeDetectionMode, Dependency,
+        DependencyAnalysis, PackageDepGlob, PackageTarget,
     },
 };
 
@@ -200,6 +200,7 @@ fn output_json(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn output_pretty(_deps: Vec<&Dependency>) {
     todo!()
 }

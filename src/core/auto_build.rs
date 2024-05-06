@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Display,
-    fs::File,
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::{mpsc::channel, Arc, RwLock},
     time::Instant,
@@ -155,6 +155,7 @@ impl Display for AnalysisType {
 }
 
 pub(crate) struct AutoBuildContext {
+    #[allow(dead_code)]
     path: AutoBuildContextPath,
     studios: BuildStudioConfig,
     store: Store,
@@ -199,6 +200,7 @@ pub(crate) struct CheckStep<'a> {
 
 #[derive(Debug)]
 pub(crate) struct BuildStep<'a> {
+    #[allow(dead_code)]
     pub index: NodeIndex,
     pub repo_ctx: &'a RepoContext,
     pub plan_ctx: &'a PlanContext,
@@ -274,6 +276,7 @@ pub(crate) enum PlanCheckStatus {
         Vec<LeveledSourceCheckViolation>,
         Vec<LeveledArtifactCheckViolation>,
     ),
+    #[allow(dead_code)]
     ArtifactNotFound,
 }
 
@@ -306,6 +309,7 @@ pub(crate) enum DownloadError {
     #[error("Sources for plan {0} is corrupt")]
     CorruptedSource(PlanContextID),
     #[error("Encountered an unexpected error while trying to download the package sources")]
+    #[allow(clippy::enum_variant_names)]
     UnexpectedDownloadError(#[source] PackageSourceDownloadError),
     #[error("Encountered an unexpected io error while trying to download the package sources")]
     UnexpectedIOError(#[source] std::io::Error),
@@ -360,7 +364,7 @@ impl AutoBuildContext {
         let store_path = if store_path.is_absolute() {
             store_path.clone()
         } else {
-            auto_build_ctx_path.as_ref().join(store_path)
+            fs::canonicalize(auto_build_ctx_path.as_ref().join(store_path))?
         };
         let store = Store::new(&store_path).with_context(|| {
             format!(
@@ -631,7 +635,7 @@ impl AutoBuildContext {
                             let checker = Checker::new();
                             checker.source_context_check_with_plan(
                                 &plan_ctx.config(),
-                                &plan_ctx,
+                                plan_ctx,
                                 &source_ctx,
                             )
                         } else {
@@ -683,7 +687,7 @@ impl AutoBuildContext {
                         let checker = Checker::new();
                         checker.source_context_check_with_plan(
                             &plan_ctx.config(),
-                            &plan_ctx,
+                            plan_ctx,
                             &source_ctx,
                         )
                     } else {
@@ -712,7 +716,7 @@ impl AutoBuildContext {
                         invalid_source_archive_path,
                     ))
                 }
-                Err(err) => return Err(DownloadError::UnexpectedDownloadError(err)),
+                Err(err) => Err(DownloadError::UnexpectedDownloadError(err)),
             }
         } else {
             Ok(DownloadStatus::MissingSource(plan_ctx.clone()))
@@ -837,6 +841,7 @@ impl AutoBuildContext {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn get_plan_contexts(&self, package: &PackageDepIdent) -> Vec<&PlanContext> {
         self.dep_graph
             .get_plan_nodes(package)
@@ -867,7 +872,7 @@ impl AutoBuildContext {
             match self.dep_graph.dep_mut(*plan_node_index) {
                 Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
                 Dependency::LocalPlan(ref mut plan_ctx) => {
-                    let causes = plan_node_changes.get(&plan_node_index);
+                    let causes = plan_node_changes.get(plan_node_index);
                     if causes.is_none() {
                         let latest_plan_artifact = artifact_cache
                             .latest_plan_minimal_artifact(&plan_ctx.id)
@@ -917,7 +922,7 @@ impl AutoBuildContext {
                             BuildOrder::Strict,
                             build_target,
                         );
-                        let causes = plan_node_changes.get(&plan_node_index);
+                        let causes = plan_node_changes.get(plan_node_index);
                         causes.is_some()
                     })
                 }
@@ -977,7 +982,7 @@ impl AutoBuildContext {
             match self.dep_graph.dep_mut(*plan_node_index) {
                 Dependency::ResolvedDep(_) | Dependency::RemoteDep(_) => {}
                 Dependency::LocalPlan(ref mut plan_ctx) => {
-                    let causes = plan_node_changes.get(&plan_node_index);
+                    let causes = plan_node_changes.get(plan_node_index);
                     if let Some(causes) = causes {
                         let mut blocking_causes = Vec::new();
                         for cause in causes {
@@ -1044,7 +1049,7 @@ impl AutoBuildContext {
                             BuildOrder::Strict,
                             build_target,
                         );
-                        let causes = plan_node_changes.get(&plan_node_index);
+                        let causes = plan_node_changes.get(plan_node_index);
                         causes.is_none()
                     })
                 }
@@ -1090,7 +1095,7 @@ impl AutoBuildContext {
                 |_edge_index, edge| Some(*edge),
             );
         }
-        let node_indices = changes_graph.node_indices().into_iter().collect::<Vec<_>>();
+        let node_indices = changes_graph.node_indices().collect::<Vec<_>>();
         let mut check_deps = self.dep_graph.get_deps(
             &node_indices,
             vec![
@@ -1290,19 +1295,19 @@ impl AutoBuildContext {
         let build_output = {
             match build_step.studio {
                 BuildStepStudio::Native => {
-                    habitat::native_package_build(&build_step, &artifact_cache, &self.store)?
+                    habitat::native_package_build(build_step, &artifact_cache, &self.store)?
                 }
                 BuildStepStudio::Bootstrap => {
-                    habitat::bootstrap_package_build(&build_step, &artifact_cache, &self.store, 1)?
+                    habitat::bootstrap_package_build(build_step, &artifact_cache, &self.store, 1)?
                 }
                 BuildStepStudio::Standard => {
-                    habitat::standard_package_build(&build_step, &artifact_cache, &self.store, 1)?
+                    habitat::standard_package_build(build_step, &artifact_cache, &self.store, 1)?
                 }
             }
         };
         // Add the artifact to the cache
         let artifact_ident = artifact_cache.artifact_add(
-            (&self.store).into(),
+            &self.store,
             LazyArtifactContext::Loaded(build_output.artifact),
         )?;
         let artifact_ctx = artifact_cache.artifact(&artifact_ident)?.unwrap();
