@@ -365,8 +365,11 @@ impl AutoBuildContext {
         let store_path = if store_path.is_absolute() {
             store_path.clone()
         } else {
-            auto_build_ctx_path.as_ref().join(store_path)
-                                .absolutize()?.to_path_buf()
+            auto_build_ctx_path
+                .as_ref()
+                .join(store_path)
+                .absolutize()?
+                .to_path_buf()
         };
         let store = Store::new(&store_path).with_context(|| {
             format!(
