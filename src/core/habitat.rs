@@ -353,13 +353,27 @@ pub(crate) fn native_package_build(
             })
             .collect::<Vec<String>>()
             .join(":");
-        let container_name = tmp_dir.path().file_name().unwrap();
+        let container_name = "hab-auto-build-native";
+        let container_id_output = std::process::Command::new("docker")
+            .args(["ps", "-aqf", &format!("name={}", container_name)])
+            .output()?;
+        let container_id = String::from_utf8_lossy(&container_id_output.stdout);
+        let container_id = container_id.trim();
+        if !container_id.is_empty() {
+            let exit_status = Exec::cmd("docker").arg("rm").arg(container_name).join()?;
+            if !exit_status.success() {
+                return Err(BuildError::Unexpected(eyre!(
+                    "Failed to remove Docker container '{}'",
+                    container_name
+                )));
+            }
+        }
+
         cmd = Exec::cmd("docker")
             .arg("run")
             .arg("-it")
             .arg("--name")
             .arg(container_name)
-            .arg("--rm")
             .arg("-v")
             .arg(format!(
                 "{}:/src",
