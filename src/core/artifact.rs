@@ -867,7 +867,7 @@ impl ArtifactContext {
                                 }
                                 "RUNTIME_PATH" => {
                                     vec![IndexedArtifactItem::RuntimePath(
-                                        data.split(':').map(PathBuf::from).collect::<Vec<_>>(),
+                                        data.split(':').map(str::trim).map(PathBuf::from).collect::<Vec<_>>(),
                                     )]
                                 }
                                 "INTERPRETERS" => {
@@ -1148,6 +1148,9 @@ impl ArtifactContext {
             } else {
                 continue;
             };
+            if let Some(metadata) = self.machos.get(&resolved_executable_path) {
+                return Some(ExecutableMetadata::MachO(metadata))
+            }
             if let Some(metadata) = self.elfs.get(&resolved_executable_path) {
                 return Some(ExecutableMetadata::Elf(metadata));
             }
@@ -1316,6 +1319,7 @@ impl ArtifactContext {
 }
 
 pub(crate) enum ExecutableMetadata<'a> {
+    MachO(&'a MachOMetadata),
     Elf(&'a ElfMetadata),
     Script(&'a ScriptMetadata),
 }
@@ -1323,6 +1327,14 @@ pub(crate) enum ExecutableMetadata<'a> {
 impl<'a> ExecutableMetadata<'a> {
     pub fn is_executable(&self) -> bool {
         match self {
+            ExecutableMetadata::MachO(metadata) => {
+                for arch in &metadata.archs {
+                    if MachOType::Executable == arch.file_type {
+                        return true
+                    }
+                }
+                return false
+            },
             ExecutableMetadata::Elf(metadata) => metadata.is_executable,
             ExecutableMetadata::Script(metadata) => metadata.is_executable,
         }
