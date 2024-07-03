@@ -5,7 +5,9 @@ building and testing of large number of inter-related plan files.
 
 ## Installation
 
-Check out this repository. Then use cargo to build and install a static `hab-auto-build` binary.
+Install the latest stable version of Rust from https://rustup.rs/.
+
+Check out this repository, then use Cargo to build and install a static `hab-auto-build` binary.
 
 ```bash
 # Asks the rust compiler to statically link in the C Runtime
