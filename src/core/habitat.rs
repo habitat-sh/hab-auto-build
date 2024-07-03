@@ -286,6 +286,7 @@ pub(crate) enum BuildError {
     #[error("Failed to build bootstrap package {0}, you can find the build log at {1}")]
     Bootstrap(PlanContextID, PathBuf),
     #[error("Failed to build standard package {0}, you can find the build log at {1}")]
+    #[allow(dead_code)]
     Standard(PlanContextID, PathBuf),
     #[error("Failed due to unexpected IO error")]
     IO(#[from] std::io::Error),

@@ -1336,7 +1336,7 @@ impl<'a> ExecutableMetadata<'a> {
                         return true;
                     }
                 }
-                return false;
+                false
             }
             ExecutableMetadata::Elf(metadata) => metadata.is_executable,
             ExecutableMetadata::Script(metadata) => metadata.is_executable,
