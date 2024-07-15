@@ -29,7 +29,7 @@ tar = { version = "0.4" }
 bzip2 = { version = "0.4" }
 flate2 = { version = "1.0" }
 xz2 = { version = "0.1" }
-zstd = { version = "0.13.1" }
+zstd = { version = "0.13.2" }
 globset = { version = "0.4" }
 chrono-humanize = { version = "0.2" }
 thiserror = { version = "1" }
