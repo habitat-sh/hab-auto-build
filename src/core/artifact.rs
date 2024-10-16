@@ -496,6 +496,29 @@ impl From<u32> for MachOType {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum PeType {
+    #[serde(rename = "executable")]
+    Executable,
+    #[serde(rename = "dynamic-link-library")]
+    DynamicLinkLibrary,
+    #[serde(rename = "system-driver")]
+    SystemDriver,
+    #[serde(rename = "other")]
+    Other,
+}
+
+impl Display for PeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeType::Executable => write!(f, "executable"),
+            PeType::DynamicLinkLibrary => write!(f, "dynamic-link-library"),
+            PeType::SystemDriver => write!(f, "system-driver"),
+            PeType::Other => write!(f, "other"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ScriptMetadata {
     pub interpreter: ScriptInterpreterMetadata,

@@ -689,6 +689,18 @@ pub(crate) fn native_package_build(
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn native_package_build(
+    _build_step: &BuildStep,
+    _artifact_cache: &ArtifactCache,
+    _store: &Store,
+) -> Result<BuildOutput, BuildError> {
+    // This should never be called on Windows
+    Err(BuildError::Unexpected(eyre!(
+        "The function 'native_package_build' should not be called on Windows."
+    )))
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn bootstrap_package_build(
     build_step: &BuildStep,
@@ -1022,6 +1034,19 @@ pub(crate) fn bootstrap_package_build(
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn bootstrap_package_build(
+    build_step: &BuildStep,
+    artifact_cache: &ArtifactCache,
+    store: &Store,
+    id: u64,
+) -> Result<BuildOutput, BuildError> {
+    // This should never be called on Windows
+    Err(BuildError::Unexpected(eyre!(
+        "The function 'bootstrap_package_build' should not be called on Windows."
+    )))
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn standard_package_build(
     build_step: &BuildStep,
@@ -1350,4 +1375,17 @@ pub(crate) fn standard_package_build(
             build_log_path,
         ))
     }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn standard_package_build(
+    build_step: &BuildStep,
+    artifact_cache: &ArtifactCache,
+    store: &Store,
+    id: u64,
+) -> Result<BuildOutput, BuildError> {
+    // This is not yet implemented never be called on Windows
+    Err(BuildError::Unexpected(eyre!(
+        "The function 'standard_package_build' not yet available."
+    )))
 }

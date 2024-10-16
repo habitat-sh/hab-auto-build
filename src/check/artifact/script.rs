@@ -346,7 +346,10 @@ pub(crate) struct ScriptCheck {
 impl Default for ScriptCheck {
     fn default() -> Self {
         Self {
+            #[cfg(not(target_os = "windows"))]
             env_interpreters: vec![String::from("env")],
+            #[cfg(target_os = "windows")]
+            env_interpreters: vec![String::from("cmd"), String::from("powershell")],
             #[cfg(target_os = "linux")]
             platform_interpreter_paths: vec![PathBuf::from("/bin/sh"), PathBuf::from("/bin/false")],
             #[cfg(target_os = "macos")]
@@ -354,6 +357,11 @@ impl Default for ScriptCheck {
                 PathBuf::from("/bin/sh"),
                 PathBuf::from("/bin/false"),
                 PathBuf::from("/usr/bin/env"),
+            ],
+            #[cfg(target_os = "windows")]
+            platform_interpreter_paths: vec![
+                PathBuf::from("C:\\Windows\\System32\\cmd.exe"),
+                PathBuf::from("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
             ],
         }
     }

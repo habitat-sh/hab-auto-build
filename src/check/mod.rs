@@ -595,6 +595,19 @@ impl Checker {
             ],
         }
     }
+    #[cfg(target_os = "windows")]
+    pub fn new() -> Checker {
+        use self::artifact::win::PeCheck;
+        Checker {
+            source_checks: vec![Box::<LicenseCheck>::default()],
+            artifact_checks: vec![
+                Box::<PackageBeforeCheck>::default(),
+                Box::<PeCheck>::default(),
+                Box::<ScriptCheck>::default(),
+                Box::<PackageAfterCheck>::default(),
+            ],
+        }
+    }
 }
 
 impl SourceCheck for Checker {
