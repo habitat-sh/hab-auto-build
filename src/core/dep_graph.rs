@@ -210,6 +210,7 @@ impl From<&DepGraph> for DepGraphData {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct DepGraph {
     pub build_graph: StableGraph<Dependency, DependencyType, Directed>,
     #[allow(dead_code)]

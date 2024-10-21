@@ -33,55 +33,92 @@ use super::{
     PackageResolvedDepIdent, PackageSource, PackageTarget, RepoContext, RepoContextID,
 };
 
-lazy_static! {
-    static ref RELATIVE_PLAN_FILE_PATHS: Vec<(PathBuf, PackageTarget)> = vec![
-        (
-            vec!["aarch64-linux", "plan.sh"],
-            PackageTarget::parse("aarch64-linux").unwrap()
-        ),
-        (
-            vec!["aarch64-darwin", "plan.sh"],
-            PackageTarget::parse("aarch64-darwin").unwrap()
-        ),
-        (
-            vec!["x86_64-darwin", "plan.sh"],
-            PackageTarget::parse("x86_64-darwin").unwrap()
-        ),
-        (
+fn get_platform_specific_paths() -> Vec<(PathBuf, PackageTarget)> {
+    let mut paths = Vec::new();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        paths.push((
             vec!["x86_64-linux", "plan.sh"],
-            PackageTarget::parse("x86_64-linux").unwrap()
-        ),
-        (
-            vec!["x86_64-windows", "plan.sh"],
-            PackageTarget::parse("x86_64-windows").unwrap()
-        ),
-        (
-            vec!["habitat", "aarch64-linux", "plan.sh"],
-            PackageTarget::parse("aarch64-linux").unwrap()
-        ),
-        (
-            vec!["habitat", "aarch64-darwin", "plan.sh"],
-            PackageTarget::parse("aarch64-darwin").unwrap()
-        ),
-        (
+            PackageTarget::parse("x86_64-linux").unwrap(),
+        ));
+        paths.push((
             vec!["habitat", "x86_64-linux", "plan.sh"],
-            PackageTarget::parse("x86_64-linux").unwrap()
-        ),
-        (
+            PackageTarget::parse("x86_64-linux").unwrap(),
+        ));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        paths.push((
+            vec!["aarch64-linux", "plan.sh"],
+            PackageTarget::parse("aarch64-linux").unwrap(),
+        ));
+        paths.push((
+            vec!["habitat", "aarch64-linux", "plan.sh"],
+            PackageTarget::parse("aarch64-linux").unwrap(),
+        ));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        paths.push((
+            vec!["x86_64-darwin", "plan.sh"],
+            PackageTarget::parse("x86_64-darwin").unwrap(),
+        ));
+        paths.push((
             vec!["habitat", "x86_64-darwin", "plan.sh"],
-            PackageTarget::parse("x86_64-darwin").unwrap()
-        ),
-        (
+            PackageTarget::parse("x86_64-darwin").unwrap(),
+        ));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        paths.push((
+            vec!["aarch64-darwin", "plan.sh"],
+            PackageTarget::parse("aarch64-darwin").unwrap(),
+        ));
+        paths.push((
+            vec!["habitat", "aarch64-darwin", "plan.sh"],
+            PackageTarget::parse("aarch64-darwin").unwrap(),
+        ));
+    }
+
+    #[cfg(any(target_os = "windows", target_arch = "x86_64"))]
+    {
+        paths.push((
+            vec!["x86_64-windows", "plan.ps1"],
+            PackageTarget::parse("x86_64-windows").unwrap(),
+        ));
+        paths.push((
             vec!["habitat", "x86_64-windows", "plan.sh"],
-            PackageTarget::parse("x86_64-windows").unwrap()
-        ),
-        (vec!["plan.sh"], PackageTarget::default()),
-        (vec!["habitat", "plan.sh"], PackageTarget::default())
-    ]
+            PackageTarget::parse("x86_64-windows").unwrap(),
+        ));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        paths.push((vec!["plan.sh"], PackageTarget::default()));
+        paths.push((vec!["habitat", "plan.sh"], PackageTarget::default()));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        paths.push((vec!["plan.ps1"], PackageTarget::default()));
+        paths.push( (vec!["habitat", "plan.ps1"], PackageTarget::default()));
+    }
+
+    paths
     .into_iter()
     .map(|(parts, target)| (parts.iter().collect::<PathBuf>(), target))
-    .collect();
+    .collect()
 }
+
+lazy_static! {
+    static ref RELATIVE_PLAN_FILE_PATHS: Vec<(PathBuf, PackageTarget)> = {
+        get_platform_specific_paths()
+    };
+}
+
 const PLAN_DATA_EXTRACT_SCRIPT: &[u8] = include_bytes!("../scripts/plan_data_extract.sh");
 const PLAN_CONFIG_FILE: &str = ".hab-plan-config.toml";
 
@@ -584,6 +621,7 @@ impl<'a> ParallelVisitor for PlanScanner<'a> {
             }
             let mut is_plan_ctx = false;
             for (plan_rel_path, plan_target) in RELATIVE_PLAN_FILE_PATHS.iter() {
+                // println!("Plan rel path {:?} and target {:?}", plan_rel_path, plan_target);
                 let plan_path = base_dir.join(plan_rel_path);
                 if plan_path.is_file() {
                     is_plan_ctx = true;

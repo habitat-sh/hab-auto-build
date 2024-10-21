@@ -155,6 +155,7 @@ impl Display for AnalysisType {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct AutoBuildContext {
     #[allow(dead_code)]
     path: AutoBuildContextPath,

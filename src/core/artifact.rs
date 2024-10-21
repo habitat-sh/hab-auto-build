@@ -141,6 +141,7 @@ impl LazyArtifactContext {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct ArtifactCache {
     pub path: ArtifactCachePath,
     known_artifacts: Arc<RwLock<ArtifactList>>,
