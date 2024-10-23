@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
+    env,
     fmt::Display,
-    io::{Read, Write},
+    fs::{self, File},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::Sender,
@@ -19,6 +21,7 @@ use ignore::{ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 use lazy_static::lazy_static;
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
 
 use tracing::{debug, error, info, trace};
 
@@ -119,7 +122,10 @@ lazy_static! {
     };
 }
 
+#[cfg(not(target_os = "windows"))]
 const PLAN_DATA_EXTRACT_SCRIPT: &[u8] = include_bytes!("../scripts/plan_data_extract.sh");
+#[cfg(target_os = "windows")]
+const PLAN_DATA_EXTRACT_SCRIPT: &[u8] = include_bytes!("../scripts/plan_data_extract.ps1");
 const PLAN_CONFIG_FILE: &str = ".hab-plan-config.toml";
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
@@ -259,6 +265,7 @@ pub(crate) enum PlanContextPathGitSyncStatus {
 
 impl PlanContext {
     #[allow(clippy::too_many_arguments)]
+    #[cfg(not(target_os = "windows"))]
     pub fn read_from_disk(
         connection: Option<&mut SqliteConnection>,
         modification_index: Option<&ModificationIndex>,
@@ -331,6 +338,130 @@ impl PlanContext {
                     }
                 }
             } else {
+                None
+            };
+
+            let mut plan_ctx = PlanContext {
+                id,
+                repo_id: repo_ctx.id.clone(),
+                is_native: repo_ctx.is_native_plan(plan_ctx_path),
+                context_path: plan_ctx_path.clone(),
+                target_context_last_modified_at: plan_target_ctx_path.last_modifed_at()?,
+                target_context_path: plan_target_ctx_path.clone(),
+                plan_path: plan_path.clone(),
+                source: raw_data.source,
+                licenses: raw_data.licenses,
+                deps: raw_data
+                    .deps
+                    .into_iter()
+                    .map(|d| d.to_resolved_dep_ident(target.to_owned()))
+                    .collect(),
+                build_deps: raw_data
+                    .build_deps
+                    .into_iter()
+                    .chain(raw_data.scaffolding_dep)
+                    .map(|d| d.to_resolved_dep_ident(target.to_owned()))
+                    .collect(),
+                latest_artifact: None,
+                files_changed_on_disk: Vec::new(),
+                files_changed_on_git: Vec::new(),
+                plan_config,
+            };
+            let latest_artifact = artifact_cache.latest_plan_minimal_artifact(&plan_ctx.id);
+            plan_ctx.determine_changes(
+                connection,
+                modification_index,
+                latest_artifact.as_ref(),
+                change_detection_mode,
+            )?;
+            trace!(
+                "Read plan context {} from disk in {}s",
+                plan_ctx.context_path.as_ref().display(),
+                start.elapsed().as_secs_f32()
+            );
+            Ok(plan_ctx)
+        } else {
+            Err(eyre!(
+                "Failed to extract plan data from {}, bash process exited with code: {}",
+                plan_path.as_ref().display(),
+                output.status,
+            )
+            .with_section(move || stdout.header("stdout: "))
+            .with_section(move || stderr.header("stderr: ")))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(target_os = "windows")]
+    pub fn read_from_disk(
+        connection: Option<&mut SqliteConnection>,
+        modification_index: Option<&ModificationIndex>,
+        repo_ctx: &RepoContext,
+        artifact_cache: &ArtifactCache,
+        plan_ctx_path: &PlanContextPath,
+        plan_target_ctx_path: &PlanTargetContextPath,
+        plan_path: &PlanFilePath,
+        target: PackageTarget,
+        change_detection_mode: ChangeDetectionMode,
+    ) -> Result<PlanContext> {
+        let start = Instant::now();
+        let temp_dir = env::temp_dir();
+        // We need to create the extraction script to execute a plan and retrieve the required metadata.
+        // We should revisit this issue, as it is generating multiple temporary files.
+        // It might be helpful to extract a separate function for Windows or refactor the existing code.
+        let mut hasher = Sha256::new();
+        hasher.update(plan_path.as_ref().display().to_string().as_bytes());
+        let result = hasher.finalize();
+        let unique_id = format!("{:x}", result);
+        let temp_file_path: PathBuf = temp_dir.join(format!("plan_data_extract_{}.ps1", unique_id));
+        {
+            let mut temp_file = File::create(&temp_file_path)
+                .with_context(|| format!("Failed to create temporary file at '{}'", temp_file_path.display()))?;
+            let mut writer = BufWriter::new(&mut temp_file);
+                writer.write_all(PLAN_DATA_EXTRACT_SCRIPT)
+                    .with_context(|| format!("Failed to write to temporary file at '{}'", temp_file_path.display()))?;
+        }
+
+        let mut child =  Command::new("powershell")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&temp_file_path)
+            .arg(plan_path.as_ref().display().to_string())
+            // .arg(plan_ctx_path.as_ref())
+            // .arg(plan_target_ctx_path.as_ref())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(plan_target_ctx_path.as_ref().display().to_string())
+            .spawn()
+            .context("Failed to execute bash shell")
+            .with_suggestion(|| "Make sure you have bash installed on your system, and that it's location is included in your PATH")?;
+        let output = child.wait_with_output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        fs::remove_file(&temp_file_path)
+            .with_context(|| format!("Failed to delete temporary file at '{}'", temp_file_path.display()))?;
+
+        if output.status.success() {
+            let raw_data: RawPlanData = serde_json::from_str(&stdout)
+                .with_context(|| {
+                    format!(
+                        "Failed to read extracted JSON data from plan file at '{}'",
+                        plan_path.as_ref().display()
+                    )
+                })
+                .with_section(move || stdout.header("stdout: "))
+                .with_section(move || stderr.header("stderr: "))
+                .with_suggestion(|| "Ensure your plan file does not generate output outside the standard functions like 'do_begin', 'do_prepare', 'do_build', 'do_check' and 'do_install'")?;
+            let id = PlanContextID(PackageBuildIdent {
+                origin: raw_data.origin,
+                name: raw_data.name,
+                version: raw_data.version,
+                target: target.to_owned(),
+            });
+            // For Windows, suppress it for now until we establish some validation rules.
+            // let plan_config_path = plan_path.plan_config_path();
+            let plan_config = {
                 None
             };
 

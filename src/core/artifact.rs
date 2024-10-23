@@ -1114,6 +1114,7 @@ impl ArtifactContext {
         .into())
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn extract_licenses_from_plan_source(plan_source: &str) -> Result<Vec<String>> {
         let mut child =  Command::new("bash")
             .arg("-s")
@@ -1154,6 +1155,26 @@ impl ArtifactContext {
             .with_section(move || plan_source.to_owned().header("manifest:"))
         }
     }
+
+    #[cfg(target_os = "windows")]
+    fn extract_licenses_from_plan_source(plan_source: &str) -> Result<Vec<String>> {
+        let contents = std::fs::read_to_string(plan_source)?;
+        let regex = regex::Regex::new(r"\$pkg_license\s*=\s*@\((.*?)\)")?;
+
+        if let Some(captures) = regex.captures(&contents) {
+            let licenses_str = &captures[1];
+
+            let licenses = licenses_str
+                .split(',')
+                .map(|s| s.trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+
+            Ok(licenses)
+        } else {
+            Err(eyre!("No licenses found in the provided plan source."))
+        }
+    }
+
     /// Search for an executable with the given name.
     /// This function only returns a result if the found executable
     /// has the executable permission set.
