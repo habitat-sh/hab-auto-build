@@ -1105,18 +1105,14 @@ impl AutoBuildContext {
         let mut check_deps = self.dep_graph.get_deps(
             &node_indices,
             {
-                let mut deps = vec![
-                    DependencyType::Runtime,
-                    DependencyType::Build,
-                ];
-    
+                let mut deps = vec![DependencyType::Runtime, DependencyType::Build];
+
                 // For Windows, we only have standard packages, so we can use the installed studio.
                 if !cfg!(target_os = "windows") {
                     deps.push(DependencyType::Studio);
                 }
-    
-                deps.into_iter()
-                .collect()
+
+                deps.into_iter().collect()
             },
             DependencyDepth::Transitive,
             DependencyDirection::Forward,

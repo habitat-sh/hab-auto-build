@@ -10,7 +10,7 @@ use crate::{
         ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext,
         LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
-    core::{ArtifactCache, ArtifactContext, PeType, GlobSetExpression, PackageIdent, PackagePath},
+    core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackageIdent, PackagePath, PeType},
     store::Store,
 };
 

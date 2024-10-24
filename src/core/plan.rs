@@ -1,14 +1,17 @@
 use std::{
     collections::HashMap,
-    env,
     fmt::Display,
-    fs::{self, File},
-    io::{BufWriter, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::Sender,
     time::Instant,
 };
+
+#[cfg(windows)]
+use std::fs::{self, File};
+#[cfg(windows)]
+use std::io::BufWriter;
 
 use chrono::{DateTime, Utc};
 use color_eyre::{
@@ -21,7 +24,9 @@ use ignore::{ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 use lazy_static::lazy_static;
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+
+#[cfg(target_os = "windows")]
+use sha2::{Digest, Sha256};
 
 use tracing::{debug, error, info, trace};
 
@@ -107,19 +112,18 @@ fn get_platform_specific_paths() -> Vec<(PathBuf, PackageTarget)> {
     #[cfg(target_os = "windows")]
     {
         paths.push((vec!["plan.ps1"], PackageTarget::default()));
-        paths.push( (vec!["habitat", "plan.ps1"], PackageTarget::default()));
+        paths.push((vec!["habitat", "plan.ps1"], PackageTarget::default()));
     }
 
     paths
-    .into_iter()
-    .map(|(parts, target)| (parts.iter().collect::<PathBuf>(), target))
-    .collect()
+        .into_iter()
+        .map(|(parts, target)| (parts.iter().collect::<PathBuf>(), target))
+        .collect()
 }
 
 lazy_static! {
-    static ref RELATIVE_PLAN_FILE_PATHS: Vec<(PathBuf, PackageTarget)> = {
-        get_platform_specific_paths()
-    };
+    static ref RELATIVE_PLAN_FILE_PATHS: Vec<(PathBuf, PackageTarget)> =
+        get_platform_specific_paths();
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -405,7 +409,7 @@ impl PlanContext {
         change_detection_mode: ChangeDetectionMode,
     ) -> Result<PlanContext> {
         let start = Instant::now();
-        let temp_dir = env::temp_dir();
+        let temp_dir = std::env::temp_dir();
         // We need to create the extraction script to execute a plan and retrieve the required metadata.
         // We should revisit this issue, as it is generating multiple temporary files.
         // It might be helpful to extract a separate function for Windows or refactor the existing code.
@@ -415,11 +419,21 @@ impl PlanContext {
         let unique_id = format!("{:x}", result);
         let temp_file_path: PathBuf = temp_dir.join(format!("plan_data_extract_{}.ps1", unique_id));
         {
-            let mut temp_file = File::create(&temp_file_path)
-                .with_context(|| format!("Failed to create temporary file at '{}'", temp_file_path.display()))?;
+            let mut temp_file = File::create(&temp_file_path).with_context(|| {
+                format!(
+                    "Failed to create temporary file at '{}'",
+                    temp_file_path.display()
+                )
+            })?;
             let mut writer = BufWriter::new(&mut temp_file);
-                writer.write_all(PLAN_DATA_EXTRACT_SCRIPT)
-                    .with_context(|| format!("Failed to write to temporary file at '{}'", temp_file_path.display()))?;
+            writer
+                .write_all(PLAN_DATA_EXTRACT_SCRIPT)
+                .with_context(|| {
+                    format!(
+                        "Failed to write to temporary file at '{}'",
+                        temp_file_path.display()
+                    )
+                })?;
         }
 
         let mut child =  Command::new("powershell")
@@ -439,8 +453,12 @@ impl PlanContext {
         let output = child.wait_with_output()?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        fs::remove_file(&temp_file_path)
-            .with_context(|| format!("Failed to delete temporary file at '{}'", temp_file_path.display()))?;
+        fs::remove_file(&temp_file_path).with_context(|| {
+            format!(
+                "Failed to delete temporary file at '{}'",
+                temp_file_path.display()
+            )
+        })?;
 
         if output.status.success() {
             let raw_data: RawPlanData = serde_json::from_str(&stdout)
@@ -461,9 +479,7 @@ impl PlanContext {
             });
             // For Windows, suppress it for now until we establish some validation rules.
             // let plan_config_path = plan_path.plan_config_path();
-            let plan_config = {
-                None
-            };
+            let plan_config = None;
 
             let mut plan_ctx = PlanContext {
                 id,
