@@ -333,6 +333,20 @@ impl Default for DuplicateRuntimeBinaryOptions {
 pub(crate) struct PackageBeforeCheck {}
 
 impl ArtifactCheck for PackageBeforeCheck {
+    #[cfg(target_os = "windows")]
+    fn artifact_context_check(
+        &self,
+        _store: &Store,
+        _rules: &PlanContextConfig,
+        _checker_context: &mut CheckerContext,
+        _artifact_cache: &mut ArtifactCache,
+        _artifact_context: &ArtifactContext,
+    ) -> Vec<LeveledArtifactCheckViolation> {
+        // Currently, we do not know what the violations are for Windows; we will revisit this later.
+        vec![].into_iter().collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn artifact_context_check(
         &self,
         _store: &Store,
@@ -662,6 +676,20 @@ impl ArtifactCheck for PackageBeforeCheck {
 pub(crate) struct PackageAfterCheck {}
 
 impl ArtifactCheck for PackageAfterCheck {
+    #[cfg(target_os = "windows")]
+    fn artifact_context_check(
+        &self,
+        _store: &Store,
+        _rules: &PlanContextConfig,
+        _checker_context: &mut CheckerContext,
+        _artifact_cache: &mut ArtifactCache,
+        _artifact_context: &ArtifactContext,
+    ) -> Vec<LeveledArtifactCheckViolation> {
+        // Currently, we do not know what the violations are for Windows; we will revisit this later.
+        vec![].into_iter().collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn artifact_context_check(
         &self,
         _store: &Store,

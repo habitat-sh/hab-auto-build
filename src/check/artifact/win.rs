@@ -73,6 +73,7 @@ impl Default for LibraryDependencyNotFoundOptions {
     }
 }
 
+// A PE (Portable Executable) check on Windows
 #[derive(Debug, Default)]
 pub(crate) struct PeCheck {}
 
