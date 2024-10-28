@@ -144,6 +144,18 @@ fn copy_source_to_cache(
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn copy_build_success_output(
+    store: &Store,
+    _build_step: &BuildStep,
+    build_log_path: impl AsRef<Path>,
+    build_output_path: impl AsRef<Path>,
+) -> Result<(PathBuf, PathBuf)> {
+    // TODO revisit later
+    Ok((PathBuf::new(), PathBuf::new()))
+}
+
+#[cfg(not(target_os = "windows"))]
 fn copy_build_success_output(
     store: &Store,
     _build_step: &BuildStep,
@@ -1384,8 +1396,141 @@ pub(crate) fn standard_package_build(
     store: &Store,
     id: u64,
 ) -> Result<BuildOutput, BuildError> {
-    // This is not yet implemented never be called on Windows
-    Err(BuildError::Unexpected(eyre!(
-        "The function 'standard_package_build' not yet available."
-    )))
+    let tmp_path = store.temp_dir_path();
+    std::fs::create_dir_all(tmp_path.as_ref())?;
+    let tmp_dir = TempDir::new_in(tmp_path.as_ref(), "standard-build").with_context(|| {
+        format!(
+            "Failed to create temporary directory in hab-auto-build store at '{}'",
+            tmp_path.as_ref().display()
+        )
+    })?;
+    let build_log_path = tmp_dir.path().join("build.log");
+    let _build_log = std::fs::File::create(&build_log_path).with_context(|| {
+        format!(
+            "Failed to create build log at '{}'",
+            build_log_path.display()
+        )
+    })?;
+    // let studio_root = HabitatRootPath::new(FSRootPath::default())
+    //     .studio_root(format!("hab-auto-build-{}", id).as_str());
+
+    let build_output_dir = tmp_dir.path();
+    let deps_to_install = build_step
+        .deps_to_install
+        .iter()
+        .filter_map(|dep| artifact_cache.latest_plan_minimal_artifact(dep))
+        .map(|artifact| {
+            format!(
+                "{}",
+                ArtifactCachePath::new(HabitatRootPath::default())
+                    .as_ref()
+                    .join(artifact.id.artifact_name())
+                    .display(),
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(":");
+    // let origin_keys = build_step
+    //     .origins
+    //     .iter()
+    //     .map(|origin| origin.to_string())
+    //     .collect::<Vec<String>>()
+    //     .join(",");
+    let relative_plan_context =
+        if build_step.plan_ctx.context_path.as_ref() == build_step.repo_ctx.path.as_ref() {
+            PathBuf::from(".")
+        } else {
+            build_step
+                .plan_ctx
+                .context_path
+                .as_ref()
+                .strip_prefix(&build_step.repo_ctx.path)
+                .unwrap()
+                .to_path_buf()
+        };
+
+    debug!(
+        "Starting build of standard package {} with studio package {}, logging output to {}",
+        relative_plan_context.display(),
+        build_step.studio_package.unwrap(),
+        build_log_path.display()
+    );
+
+    // install_artifact_offline(
+    //     &artifact_cache
+    //         .latest_minimal_artifact(
+    //             &build_step
+    //                 .studio_package
+    //                 .unwrap()
+    //                 .to_resolved_dep_ident(PackageTarget::default()),
+    //         )
+    //         .unwrap()
+    //         .id,
+    // )?;
+
+    let build_log = std::fs::File::options()
+        .append(true)
+        .open(&build_log_path)
+        .with_context(|| {
+            format!(
+                "Failed to append to build log at '{}'",
+                build_log_path.display()
+            )
+        })?;
+
+    // copy_source_to_cache(
+    //     build_step,
+    //     store,
+    //     &HabitatRootPath::new(FSRootPath::default()).source_cache(),
+    // )?;
+
+    let mut cmd = Exec::cmd("hab")
+        .arg("pkg")
+        .arg("build")
+        .arg("--docker")
+        .arg(relative_plan_context)
+        .env("CERT_PATH", "c:/hab/cache/ssl")
+        .env(
+            "ARTIFACT_PATH",
+            ArtifactCachePath::new(HabitatRootPath::default()).as_ref(),
+        )
+        .env(
+            "HAB_ORIGIN",
+            build_step.plan_ctx.id.as_ref().origin.to_string(),
+        )
+        // .env("HAB_ORIGIN_KEYS", origin_keys)
+        .env("HAB_LICENSE", "accept-no-persist")
+        .env("INSTALL_PKGS", deps_to_install)
+        .env("NO_INSTALL_DEPS", "1")
+        .cwd(build_step.repo_ctx.path.as_ref())
+        .stdin(NullFile)
+        .stdout(Redirection::File(build_log))
+        .stderr(Redirection::Merge);
+    if !build_step.allow_remote {
+        cmd = cmd.env("HAB_BLDR_URL", "https://non-existent");
+    }
+    trace!("Executing command: {:?}", cmd);
+    let exit_status = cmd.join()?;
+    if exit_status.success() {
+        let (artifact_path, build_log_path) =
+            copy_build_success_output(store, build_step, &build_log_path, build_output_dir)?;
+        Ok(BuildOutput {
+            artifact: ArtifactContext::read_from_disk(artifact_path.as_path(), None).with_context(
+                || {
+                    format!(
+                        "Failed to index built artifact: {}",
+                        artifact_path.display()
+                    )
+                },
+            )?,
+            build_log: build_log_path,
+        })
+    } else {
+        let build_log_path =
+            copy_build_failure_output(store, build_step, &build_log_path, build_output_dir)?;
+        Err(BuildError::Bootstrap(
+            build_step.plan_ctx.id.clone(),
+            build_log_path,
+        ))
+    }
 }

@@ -122,8 +122,14 @@ impl FileKind {
 pub(crate) struct FSRootPath(PathBuf);
 
 impl Default for FSRootPath {
+    #[cfg(not(target_os = "windows"))]
     fn default() -> Self {
         Self(PathBuf::from("/"))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn default() -> Self {
+        Self(PathBuf::from("c:/"))
     }
 }
 

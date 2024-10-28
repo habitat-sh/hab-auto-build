@@ -691,7 +691,9 @@ impl ArtifactContext {
             .transpose()?
             .ok_or(eyre!("Invalid artifact name"))?;
 
-        if let Some(entry) = (tar.entries()?).next() {
+        // We need to skip 5 entries to retrieve the path with the full identifier.
+        let entries_to_skip = if cfg!(target_os = "windows") { 5 } else { 0 };
+        if let Some(entry) = (tar.entries()?).nth(entries_to_skip) {
             let entry = entry?;
             let path = entry.path()?;
 
@@ -949,8 +951,16 @@ impl ArtifactContext {
                                             },
                                         ));
                                     }
+                                    let shell_type = if cfg!(target_os = "windows") {
+                                        "ps1"
+                                    } else {
+                                        "bash"
+                                    };
+
+                                    // Split the source based on the delimiter
+                                    let split_str = format!("```{}", shell_type);
                                     plan_source = plan_source
-                                        .split_once("```bash")
+                                        .split_once(&split_str)
                                         .unwrap()
                                         .1
                                         .rsplit_once("```")
