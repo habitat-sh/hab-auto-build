@@ -933,7 +933,9 @@ impl ArtifactContext {
                                                 .split_terminator(&['[', ']'])
                                                 .collect::<Vec<_>>();
                                             if let Some(url) = src.get(1) {
-                                                pkg_source = Some(Url::parse(url)?);
+                                                if !url.is_empty() {
+                                                    pkg_source = Some(Url::parse(url)?);
+                                                }
                                             }
                                         }
                                         if let Some(value) = line.strip_prefix("* __SHA__:") {

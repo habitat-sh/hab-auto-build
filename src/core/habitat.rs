@@ -1543,6 +1543,11 @@ pub(crate) fn standard_package_build(
     //     store,
     //     &HabitatRootPath::new(FSRootPath::default()).source_cache(),
     // )?;
+    let bldr_url = if build_step.allow_remote {
+        "https://bldr.habitat.sh"
+    } else {
+        "https://non-existent"
+    };
     let mut cmd = Exec::cmd("powershell")
         .arg("-Command")
         .arg("docker")
@@ -1557,6 +1562,8 @@ pub(crate) fn standard_package_build(
             "HAB_ORIGIN={}",
             build_step.plan_ctx.id.as_ref().origin
         ))
+        .arg("-e")
+        .arg(format!("HAB_BLDR_URL={}", bldr_url))
         .arg("--volume")
         .arg(format!(
             "{}:{}",
