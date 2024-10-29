@@ -615,10 +615,13 @@ impl From<&ArtifactContext> for MinimalArtifactContext {
     }
 }
 
+#[derive(Debug)]
 enum RawArtifactItem {
     MetaFile(String, String),
     Resource(PathBuf, u32, FileKind, Vec<u8>),
 }
+
+#[derive(Debug)]
 enum IndexedArtifactItem {
     PackageIdent(PackageDepIdent),
     PackageTarget(PackageTarget),
@@ -777,8 +780,11 @@ impl ArtifactContext {
         let mut elfs = HashMap::new();
         let mut machos = HashMap::new();
 
+        // We need to skip 5 entries to retrieve the path with the full identifier.
+        let entries_to_skip = if cfg!(target_os = "windows") { 5 } else { 0 };
         let indexed_item_batches = tar
             .entries()?
+            .skip(entries_to_skip)
             .filter_map(|entry| entry.ok())
             .map(|mut entry| {
                 let header = entry.header();
@@ -1168,12 +1174,9 @@ impl ArtifactContext {
 
     #[cfg(target_os = "windows")]
     fn extract_licenses_from_plan_source(plan_source: &str) -> Result<Vec<String>> {
-        let contents = std::fs::read_to_string(plan_source)?;
-        let regex = regex::Regex::new(r"\$pkg_license\s*=\s*@\((.*?)\)")?;
-
-        if let Some(captures) = regex.captures(&contents) {
+        let regex = regex::Regex::new(r"\$pkg_license\s*=\s*@?\((.*?)\)")?;
+        if let Some(captures) = regex.captures(plan_source) {
             let licenses_str = &captures[1];
-
             let licenses = licenses_str
                 .split(',')
                 .map(|s| s.trim_matches('"').trim_matches('\'').to_string())

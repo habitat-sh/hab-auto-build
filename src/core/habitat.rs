@@ -151,8 +151,68 @@ fn copy_build_success_output(
     build_log_path: impl AsRef<Path>,
     build_output_path: impl AsRef<Path>,
 ) -> Result<(PathBuf, PathBuf)> {
-    // TODO revisit later
-    Ok((PathBuf::new(), PathBuf::new()))
+    let last_build_path = build_output_path.as_ref().join("last_build.ps1");
+    let last_build = std::fs::read_to_string(&last_build_path).with_context(|| {
+        format!(
+            "Failed to read last build file at '{}'",
+            last_build_path.display()
+        )
+    })?;
+    let artifact_name = last_build
+        .lines()
+        .filter_map(|l| l.strip_prefix("$pkg_artifact="))
+        .next()
+        .unwrap()
+        .trim()
+        .trim_matches('"'); // Trims double quotes
+    let final_build_artifacts_dir_path = store.package_build_artifacts_path();
+    std::fs::create_dir_all(final_build_artifacts_dir_path.as_ref()).with_context(|| {
+        format!(
+            "Failed to create build artifact directory at '{}'",
+            final_build_artifacts_dir_path.as_ref().display()
+        )
+    })?;
+    let artifact_path = build_output_path.as_ref().join(artifact_name);
+    let final_artifact_path = final_build_artifacts_dir_path.as_ref().join(artifact_name);
+
+    let final_build_log_dir_path = store.package_build_success_logs_path();
+    std::fs::create_dir_all(final_build_log_dir_path.as_ref()).with_context(|| {
+        format!(
+            "Failed to create build log directory at '{}'",
+            final_build_log_dir_path.as_ref().display()
+        )
+    })?;
+    let final_build_log_path = final_build_log_dir_path.as_ref().join(format!(
+        "{}.log",
+        artifact_name.strip_suffix(".hart").unwrap()
+    ));
+    debug!(
+        "Moving build log from {} to {}",
+        build_log_path.as_ref().display(),
+        final_build_log_path.display()
+    );
+    std::fs::rename(build_log_path.as_ref(), final_build_log_path.as_path()).with_context(
+        || {
+            format!(
+                "Failed to move build log from {} to {}",
+                build_log_path.as_ref().display(),
+                final_build_log_path.display()
+            )
+        },
+    )?;
+    debug!(
+        "Moving build artifact from {} to {}",
+        artifact_path.display(),
+        final_artifact_path.display()
+    );
+    std::fs::rename(artifact_path.as_path(), final_artifact_path.as_path()).with_context(|| {
+        format!(
+            "Failed to move build artifact from {} to {}",
+            artifact_path.display(),
+            final_artifact_path.display()
+        )
+    })?;
+    Ok((final_artifact_path, final_build_log_path))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1414,7 +1474,7 @@ pub(crate) fn standard_package_build(
     // let studio_root = HabitatRootPath::new(FSRootPath::default())
     //     .studio_root(format!("hab-auto-build-{}", id).as_str());
 
-    let build_output_dir = tmp_dir.path();
+    let build_output_dir = build_step.repo_ctx.path.as_ref().join("results");
     let deps_to_install = build_step
         .deps_to_install
         .iter()
@@ -1483,25 +1543,38 @@ pub(crate) fn standard_package_build(
     //     store,
     //     &HabitatRootPath::new(FSRootPath::default()).source_cache(),
     // )?;
-
-    let mut cmd = Exec::cmd("hab")
-        .arg("pkg")
-        .arg("build")
-        .arg("--docker")
-        .arg(relative_plan_context)
-        .env("CERT_PATH", "c:/hab/cache/ssl")
-        .env(
-            "ARTIFACT_PATH",
-            ArtifactCachePath::new(HabitatRootPath::default()).as_ref(),
-        )
-        .env(
-            "HAB_ORIGIN",
-            build_step.plan_ctx.id.as_ref().origin.to_string(),
-        )
-        // .env("HAB_ORIGIN_KEYS", origin_keys)
+    let mut cmd = Exec::cmd("powershell")
+        .arg("-Command")
+        .arg("docker")
+        .arg("run")
+        .arg("--rm")
+        // .arg("--tty")
+        .arg("--interactive")
         .env("HAB_LICENSE", "accept-no-persist")
-        .env("INSTALL_PKGS", deps_to_install)
-        .env("NO_INSTALL_DEPS", "1")
+        .env("HAB_STUDIO_SECRET_HAB_STUDIO_HOST_ARCH", "x86_64-windows")
+        .arg("-e")
+        .arg(format!(
+            "HAB_ORIGIN={}",
+            build_step.plan_ctx.id.as_ref().origin
+        ))
+        .arg("--volume")
+        .arg(format!(
+            "{}:{}",
+            build_step.repo_ctx.path.as_ref().display(),
+            "c:/src"
+        ))
+        .arg("--volume")
+        .arg("c:/hab/cache/keys:c:/hab/cache/keys")
+        .arg("--volume")
+        .arg("c:/hab/cache/artifacts:c:/hab/cache/artifacts")
+        .arg("--volume")
+        .arg("c:/hab/cache/ssl:c:/hab/cache/ssl")
+        .arg("habitat/win-studio-x86_64-windows:ltsc2019-1.6.1041")
+        .arg("build")
+        .arg(relative_plan_context)
+        .arg("-n")
+        .arg("-o")
+        .arg("c:/")
         .cwd(build_step.repo_ctx.path.as_ref())
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
@@ -1509,6 +1582,7 @@ pub(crate) fn standard_package_build(
     if !build_step.allow_remote {
         cmd = cmd.env("HAB_BLDR_URL", "https://non-existent");
     }
+
     trace!("Executing command: {:?}", cmd);
     let exit_status = cmd.join()?;
     if exit_status.success() {

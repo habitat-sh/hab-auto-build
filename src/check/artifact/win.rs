@@ -81,18 +81,19 @@ impl ArtifactCheck for PeCheck {
     fn artifact_context_check(
         &self,
         _store: &Store,
-        rules: &PlanContextConfig,
-        checker_context: &mut CheckerContext,
+        _rules: &PlanContextConfig,
+        _checker_context: &mut CheckerContext,
         _artifact_cache: &mut ArtifactCache,
-        artifact_context: &ArtifactContext,
+        _artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
+        #[allow(unused_mut)]
         let mut violations = vec![];
         // let mut used_deps = HashSet::new();
-        let tdep_artifacts = checker_context
-            .tdeps
-            .as_ref()
-            .expect("Check context missing transitive dep artifacts");
-
+        // let tdep_artifacts = checker_context
+        //     .tdeps
+        //     .as_ref()
+        //     .expect("Check context missing transitive dep artifacts");
+        // TODO we are not doing any validations at the moment
         violations.into_iter().collect()
     }
 }
