@@ -1471,8 +1471,9 @@ pub(crate) fn standard_package_build(
             build_log_path.display()
         )
     })?;
-    // let studio_root = HabitatRootPath::new(FSRootPath::default())
-    //     .studio_root(format!("hab-auto-build-{}", id).as_str());
+
+    let studio_root = HabitatRootPath::new(FSRootPath::default())
+        .studio_root(format!("hab-auto-build-{}", id).as_str());
 
     let build_output_dir = build_step.repo_ctx.path.as_ref().join("results");
     let deps_to_install = build_step
@@ -1489,7 +1490,8 @@ pub(crate) fn standard_package_build(
             )
         })
         .collect::<Vec<String>>()
-        .join(":");
+        .join(";");
+
     // let origin_keys = build_step
     //     .origins
     //     .iter()
@@ -1543,46 +1545,71 @@ pub(crate) fn standard_package_build(
     //     store,
     //     &HabitatRootPath::new(FSRootPath::default()).source_cache(),
     // )?;
-    let bldr_url = if build_step.allow_remote {
-        "https://bldr.habitat.sh"
-    } else {
-        "https://non-existent"
-    };
+
+    // let bldr_url = if build_step.allow_remote {
+    //     "https://bldr.habitat.sh"
+    // } else {
+    //     "https://non-existent"
+    // };
+
+    // TODO commenting docker as we require some changes
+    // let mut cmd = Exec::cmd("powershell")
+    //     .arg("-Command")
+    //     .arg("docker")
+    //     .arg("run")
+    //     .arg("--rm")
+    //     // .arg("--tty")
+    //     .arg("--interactive")
+    //     .env("HAB_LICENSE", "accept-no-persist")
+    //     .env("HAB_STUDIO_SECRET_HAB_STUDIO_HOST_ARCH", "x86_64-windows")
+    //     // .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
+    //     .arg("-e")
+    //     .arg(format!(
+    //         "HAB_ORIGIN={}",
+    //         build_step.plan_ctx.id.as_ref().origin
+    //     ))
+    //     .arg("-e")
+    //     .arg(format!("HAB_BLDR_URL={}", bldr_url))
+    //     .arg("-e")
+    //     .arg(format!("HAB_STUDIO_INSTALL_PKGS={}", deps_to_install))
+    //     .arg("--volume")
+    //     .arg(format!(
+    //         "{}:{}",
+    //         build_step.repo_ctx.path.as_ref().display(),
+    //         "c:/src"
+    //     ))
+    //     .arg("--volume")
+    //     .arg("c:/hab/cache/keys:c:/hab/cache/keys")
+    //     .arg("--volume")
+    //     .arg("c:/hab/cache/artifacts:c:/hab/cache/artifacts")
+    //     .arg("--volume")
+    //     .arg("c:/hab/cache/ssl:c:/hab/cache/ssl")
+    //     .arg("habitat/win-studio-x86_64-windows:ltsc2019-1.6.1041")
+    //     .arg("build")
+    //     .arg(relative_plan_context)
+    //     .arg("-n")
+    //     .arg("-o")
+    //     .arg("c:/")
+    //     .cwd(build_step.repo_ctx.path.as_ref())
+    //     .stdin(NullFile)
+    //     .stdout(Redirection::File(build_log))
+    //     .stderr(Redirection::Merge);
+
     let mut cmd = Exec::cmd("powershell")
         .arg("-Command")
-        .arg("docker")
-        .arg("run")
-        .arg("--rm")
-        // .arg("--tty")
-        .arg("--interactive")
+        .arg("hab")
+        .arg("pkg")
+        .env(
+            "HAB_ORIGIN",
+            build_step.plan_ctx.id.as_ref().origin.to_string(),
+        )
         .env("HAB_LICENSE", "accept-no-persist")
-        .env("HAB_STUDIO_SECRET_HAB_STUDIO_HOST_ARCH", "x86_64-windows")
-        .arg("-e")
-        .arg(format!(
-            "HAB_ORIGIN={}",
-            build_step.plan_ctx.id.as_ref().origin
-        ))
-        .arg("-e")
-        .arg(format!("HAB_BLDR_URL={}", bldr_url))
-        .arg("--volume")
-        .arg(format!(
-            "{}:{}",
-            build_step.repo_ctx.path.as_ref().display(),
-            "c:/src"
-        ))
-        .arg("--volume")
-        .arg("c:/hab/cache/keys:c:/hab/cache/keys")
-        .arg("--volume")
-        .arg("c:/hab/cache/artifacts:c:/hab/cache/artifacts")
-        .arg("--volume")
-        .arg("c:/hab/cache/ssl:c:/hab/cache/ssl")
-        .arg("habitat/win-studio-x86_64-windows:ltsc2019-1.6.1041")
+        .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
+        .env("NO_INSTALL_DEPS", "1")
+        .env("HAB_STUDIO_ROOT", get_normalized_path(studio_root.as_ref()))
         .arg("build")
         .arg(relative_plan_context)
-        .arg("-n")
-        .arg("-o")
-        .arg("c:/")
-        .cwd(build_step.repo_ctx.path.as_ref())
+        .cwd(get_normalized_path(build_step.repo_ctx.path.as_ref()))
         .stdin(NullFile)
         .stdout(Redirection::File(build_log))
         .stderr(Redirection::Merge);
@@ -1613,5 +1640,19 @@ pub(crate) fn standard_package_build(
             build_step.plan_ctx.id.clone(),
             build_log_path,
         ))
+    }
+}
+
+// On Windows, Rust uses the \\?\ prefix to bypass path length limitations.
+// This function strips the additional prefix as a simple workaround, which works in most cases,
+// particularly for hab-auto-build.
+#[cfg(target_os = "windows")]
+fn get_normalized_path(path: &Path) -> String {
+    let prefix: &str = r#"\\?\"#;
+    let normalized_path = path.display().to_string();
+    if normalized_path.starts_with(prefix) {
+        normalized_path.strip_prefix(prefix).unwrap().to_string()
+    } else {
+        normalized_path
     }
 }
