@@ -1,8 +1,13 @@
 use std::{
-    collections::{hash_map::Entry, BTreeSet, HashMap},
-    ffi::OsString,
+    collections::BTreeSet,
     fmt::Display,
     path::PathBuf,
+};
+
+#[cfg(not(target_os = "windows"))]
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    ffi::OsString,
 };
 
 use owo_colors::OwoColorize;
@@ -10,12 +15,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext,
+        ArtifactCheck, CheckerContext,
         LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, PackageDepGlob, PackageIdent, PackagePath},
     store::Store,
 };
+
+#[cfg(not(target_os = "windows"))]
+use crate::check::{ArtifactCheckViolation, ArtifactRuleOptions};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "rule", content = "metadata")]

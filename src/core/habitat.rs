@@ -1,8 +1,13 @@
 use super::{
     ArtifactCache, ArtifactCachePath, ArtifactContext, BuildStep, FSRootPath, HabitatRootPath,
-    HabitatSourceCachePath, PackageIdent, PlanContextID,
+    HabitatSourceCachePath, PlanContextID,
 };
-use crate::{check::PlanContextConfig, core::PackageTarget, store::Store};
+#[cfg(not(target_os = "windows"))]
+use super::PackageIdent;
+
+use crate::store::Store;
+#[cfg(not(target_os = "windows"))]
+use crate::{check::PlanContextConfig, core::PackageTarget};
 use chrono::Utc;
 use color_eyre::eyre::{eyre, Context, Result};
 use goblin::{
@@ -12,11 +17,13 @@ use goblin::{
 use lazy_static::lazy_static;
 use std::{
     collections::{BTreeSet, VecDeque},
-    env,
     fmt::Write,
     path::{Path, PathBuf},
-    process::Stdio,
 };
+#[cfg(not(target_os = "windows"))]
+use std::process::Stdio;
+#[cfg(not(target_os = "windows"))]
+use std::env;
 use subprocess::{Exec, NullFile, Redirection};
 use tempdir::TempDir;
 use thiserror::Error;
@@ -69,6 +76,7 @@ const MACOS_CPU_SUBTYPE: u32 = 2;
 #[allow(dead_code)]
 const SANDBOX_DEFAULTS: &str = include_str!("../scripts/sandbox-defaults.sb");
 
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn install_artifact_offline(package_ident: &PackageIdent) -> Result<()> {
     debug!("Installing habitat package {}", package_ident);
     let exit_status = std::process::Command::new("sudo")
@@ -353,6 +361,7 @@ pub(crate) struct BuildOutput {
 
 #[derive(Debug, Error)]
 pub(crate) enum BuildError {
+    #[allow(dead_code)]
     #[error("Failed to build native package {0}, you can find the build log at {1}")]
     Native(PlanContextID, PathBuf),
     #[error("Failed to build bootstrap package {0}, you can find the build log at {1}")]
@@ -1108,10 +1117,10 @@ pub(crate) fn bootstrap_package_build(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn bootstrap_package_build(
-    build_step: &BuildStep,
-    artifact_cache: &ArtifactCache,
-    store: &Store,
-    id: u64,
+    _build_step: &BuildStep,
+    _artifact_cache: &ArtifactCache,
+    _store: &Store,
+    _id: u64,
 ) -> Result<BuildOutput, BuildError> {
     // This should never be called on Windows
     Err(BuildError::Unexpected(eyre!(

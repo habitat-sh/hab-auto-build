@@ -1,13 +1,14 @@
 use std::{
     collections::HashMap,
     fmt::Display,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::Sender,
     time::Instant,
 };
-
+#[cfg(not(target_os = "windows"))]
+use std::io::Read;
 #[cfg(windows)]
 use std::fs::{self, File};
 #[cfg(windows)]
@@ -436,14 +437,12 @@ impl PlanContext {
                 })?;
         }
 
-        let mut child =  Command::new("powershell")
+        let child =  Command::new("powershell")
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")
             .arg(&temp_file_path)
             .arg(plan_path.as_ref().display().to_string())
-            // .arg(plan_ctx_path.as_ref())
-            // .arg(plan_target_ctx_path.as_ref())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .current_dir(plan_target_ctx_path.as_ref().display().to_string())

@@ -1,16 +1,15 @@
-use std::{collections::HashSet, fmt::Display, path::PathBuf};
+use std::{fmt::Display, path::PathBuf};
 
 use owo_colors::OwoColorize;
-use path_absolutize::Absolutize;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext,
+        ArtifactCheck, CheckerContext,
         LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
     },
-    core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackageIdent, PackagePath, PeType},
+    core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackagePath},
     store::Store,
 };
 
@@ -39,7 +38,7 @@ impl Display for LibraryDependencyNotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}: The library {} could not be found in any rpath / runpath directories",
+            "{}: The library {} could not be found in any specified directories or system paths",
             self.source
                 .relative_package_path()
                 .unwrap()
@@ -86,14 +85,14 @@ impl ArtifactCheck for PeCheck {
         _artifact_cache: &mut ArtifactCache,
         _artifact_context: &ArtifactContext,
     ) -> Vec<LeveledArtifactCheckViolation> {
-        #[allow(unused_mut)]
-        let mut violations = vec![];
+        debug!("Skipping artifact context check against plan for issues");
+        let violations = vec![];
         // let mut used_deps = HashSet::new();
         // let tdep_artifacts = checker_context
         //     .tdeps
         //     .as_ref()
         //     .expect("Check context missing transitive dep artifacts");
-        // TODO we are not doing any validations at the moment
+
         violations.into_iter().collect()
     }
 }

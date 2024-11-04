@@ -1,8 +1,7 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
-use color_eyre::{
-    eyre::{eyre, Context, Result},
-    Help, SectionExt,
-};
+use color_eyre::eyre::{eyre, Context, Result};
+#[cfg(not(target_os = "windows"))]
+use color_eyre::{ Help, SectionExt};
 use diesel::Connection;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use goblin::{
@@ -23,15 +22,19 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
     fmt::Display,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read},
     ops::Deref,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         mpsc::{channel, Sender},
         Arc, RwLock, RwLockWriteGuard,
     },
     time::Instant,
+};
+#[cfg(not(target_os = "windows"))]
+use std::{
+    io::Write,
+    process::{Command, Stdio},
 };
 use tar::Archive;
 use tracing::{debug, error, info, trace};
@@ -74,6 +77,8 @@ lazy_static! {
         globset_builder.build().unwrap()
     };
 }
+
+#[cfg(not(target_os = "windows"))]
 const ARTIFACT_DATA_EXTRACT_SCRIPT: &[u8] = include_bytes!("../scripts/artifact_data_extract.sh");
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
@@ -83,6 +88,8 @@ impl ArtifactCachePath {
     pub fn new(hab_root: HabitatRootPath) -> ArtifactCachePath {
         ArtifactCachePath(hab_root.as_ref().join("cache").join("artifacts"))
     }
+
+    #[cfg(not(target_os = "windows"))]
     pub fn artifact_path(&self, ident: &PackageIdent) -> ArtifactPath {
         ArtifactPath(self.0.join(ident.artifact_name()))
     }
@@ -275,6 +282,7 @@ impl ArtifactCache {
         self.load_lazy_artifact(lazy_artifact)
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn latest_minimal_artifact(
         &self,
         dep_ident: &PackageResolvedDepIdent,
@@ -1193,6 +1201,7 @@ impl ArtifactContext {
     /// Search for an executable with the given name.
     /// This function only returns a result if the found executable
     /// has the executable permission set.
+    #[cfg(not(target_os = "windows"))]
     pub fn search_runtime_executable(
         &self,
         tdeps: &HashMap<PackageIdent, ArtifactContext>,
@@ -1224,6 +1233,7 @@ impl ArtifactContext {
         None
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn resolve_path(
         &self,
         tdeps: &HashMap<PackageIdent, ArtifactContext>,
@@ -1300,6 +1310,7 @@ impl ArtifactContext {
         resolved_path
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn resolve_path_and_intermediates(
         &self,
         tdeps: &HashMap<PackageIdent, ArtifactContext>,
@@ -1381,12 +1392,14 @@ impl ArtifactContext {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 pub(crate) enum ExecutableMetadata<'a> {
     MachO(&'a MachOMetadata),
     Elf(&'a ElfMetadata),
     Script(&'a ScriptMetadata),
 }
 
+#[cfg(not(target_os = "windows"))]
 impl<'a> ExecutableMetadata<'a> {
     pub fn is_executable(&self) -> bool {
         match self {

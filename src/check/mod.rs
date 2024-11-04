@@ -8,17 +8,20 @@ use std::{
 
 use crate::{
     core::{
-        ArtifactCache, ArtifactContext, PackageIdent, PackageTarget, PlanContext, SourceContext,
+        ArtifactCache, ArtifactContext, PackageIdent, PlanContext, SourceContext,
     },
     store::Store,
 };
-
+#[cfg(not(target_os = "windows"))]
+use crate::core::PackageTarget;
+#[cfg(not(target_os = "windows"))]
 use color_eyre::{
     eyre::{eyre, Result},
     Help, SectionExt,
 };
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_os = "windows"))]
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Value};
 use tracing::debug;
 
@@ -77,6 +80,7 @@ impl PlanContextConfig {
         self
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn from_str(value: &str, target: PackageTarget) -> Result<PlanContextConfig> {
         let document = value.parse::<DocumentMut>()?;
         let mut restructured_document = DocumentMut::new();
@@ -550,12 +554,16 @@ pub(crate) trait ArtifactCheck {
 
 #[derive(Debug, Default)]
 pub(crate) struct CheckerContext {
+    #[allow(dead_code)]
     tdeps: Option<HashMap<PackageIdent, ArtifactContext>>,
+    #[allow(dead_code)]
     runtime_artifacts: Option<Vec<ArtifactContext>>,
+    #[allow(dead_code)]
     unused_deps: Option<HashSet<PackageIdent>>,
 }
 
 impl CheckerContext {
+    #[allow(dead_code)]
     pub fn mark_used(&mut self, dep: &PackageIdent) {
         if let Some(unused_deps) = self.unused_deps.as_mut() {
             unused_deps.remove(dep);

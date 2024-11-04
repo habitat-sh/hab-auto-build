@@ -209,6 +209,7 @@ pub(crate) struct BuildStep<'a> {
     pub studio: BuildStepStudio,
     pub allow_remote: bool,
     pub studio_package: Option<&'a PackageDepIdent>,
+    #[allow(dead_code)]
     pub origins: HashSet<PackageOrigin>,
     pub deps_to_install: Vec<&'a PlanContextID>,
     pub remote_deps: Vec<&'a Dependency>,
