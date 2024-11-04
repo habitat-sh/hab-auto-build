@@ -593,18 +593,6 @@ impl AutoBuildContext {
         }
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn download_plan_source(
-        &self,
-        plan_ctx: &PlanContext,
-        _check_source: bool,
-    ) -> Result<DownloadStatus, DownloadError> {
-        // Currently, we are not performing any validations for Windows and are reusing MissingSource;
-        // we may need to revisit this if validations become necessary.
-        Ok(DownloadStatus::MissingSource(plan_ctx.clone()))
-    }
-
-    #[cfg(not(target_os = "windows"))]
     pub fn download_plan_source(
         &self,
         plan_ctx: &PlanContext,

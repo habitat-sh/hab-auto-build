@@ -1540,11 +1540,11 @@ pub(crate) fn standard_package_build(
             )
         })?;
 
-    // copy_source_to_cache(
-    //     build_step,
-    //     store,
-    //     &HabitatRootPath::new(FSRootPath::default()).source_cache(),
-    // )?;
+    copy_source_to_cache(
+        build_step,
+        store,
+        &HabitatRootPath::new(FSRootPath::from(studio_root.clone())).source_cache(),
+    )?;
 
     // let bldr_url = if build_step.allow_remote {
     //     "https://bldr.habitat.sh"
@@ -1608,6 +1608,7 @@ pub(crate) fn standard_package_build(
         .env("NO_INSTALL_DEPS", "1")
         .env("HAB_STUDIO_ROOT", get_normalized_path(studio_root.as_ref()))
         .arg("build")
+        .arg("-R")
         .arg(relative_plan_context)
         .cwd(get_normalized_path(build_step.repo_ctx.path.as_ref()))
         .stdin(NullFile)

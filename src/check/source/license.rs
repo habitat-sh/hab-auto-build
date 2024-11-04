@@ -14,6 +14,8 @@ use crate::{
     },
     core::{ArtifactContext, PackageSha256Sum, PlanContext, SourceContext},
 };
+#[cfg(target_os = "windows")]
+use tracing::debug;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "rule", content = "metadata")]
@@ -174,6 +176,20 @@ impl Default for InvalidLicenseExpressionOptions {
 pub(crate) struct LicenseCheck {}
 
 impl LicenseCheck {
+    #[cfg(target_os = "windows")]
+    fn source_context_check(
+        &self,
+        _rules: &PlanContextConfig,
+        _license_expressions: &[String],
+        _source_context: &SourceContext,
+    ) -> Vec<LeveledSourceCheckViolation> {
+        // We are not currently performing any license checks for Windows.
+        debug!("Skipping package source check against plan for issues");
+        let violations = Vec::new();
+        violations.into_iter().collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn source_context_check(
         &self,
         rules: &PlanContextConfig,
