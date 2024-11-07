@@ -1,10 +1,9 @@
+#[cfg(not(target_os = "windows"))]
+use super::PackageIdent;
 use super::{
     ArtifactCache, ArtifactCachePath, ArtifactContext, BuildStep, FSRootPath, HabitatRootPath,
     HabitatSourceCachePath, PlanContextID,
 };
-#[cfg(not(target_os = "windows"))]
-use super::PackageIdent;
-
 use crate::store::Store;
 #[cfg(not(target_os = "windows"))]
 use crate::{check::PlanContextConfig, core::PackageTarget};
@@ -15,15 +14,15 @@ use goblin::{
     Object,
 };
 use lazy_static::lazy_static;
+#[cfg(not(target_os = "windows"))]
+use std::env;
+#[cfg(not(target_os = "windows"))]
+use std::process::Stdio;
 use std::{
     collections::{BTreeSet, VecDeque},
     fmt::Write,
     path::{Path, PathBuf},
 };
-#[cfg(not(target_os = "windows"))]
-use std::process::Stdio;
-#[cfg(not(target_os = "windows"))]
-use std::env;
 use subprocess::{Exec, NullFile, Redirection};
 use tempdir::TempDir;
 use thiserror::Error;
@@ -1501,12 +1500,12 @@ pub(crate) fn standard_package_build(
         .collect::<Vec<String>>()
         .join(";");
 
-    // let origin_keys = build_step
-    //     .origins
-    //     .iter()
-    //     .map(|origin| origin.to_string())
-    //     .collect::<Vec<String>>()
-    //     .join(",");
+    let origin_keys = build_step
+        .origins
+        .iter()
+        .map(|origin| origin.to_string())
+        .collect::<Vec<String>>()
+        .join(" ");
     let relative_plan_context =
         if build_step.plan_ctx.context_path.as_ref() == build_step.repo_ctx.path.as_ref() {
             PathBuf::from(".")
@@ -1577,6 +1576,7 @@ pub(crate) fn standard_package_build(
     //         "HAB_ORIGIN={}",
     //         build_step.plan_ctx.id.as_ref().origin
     //     ))
+    //     .env("HAB_ORIGIN_KEYS", origin_keys)
     //     .arg("-e")
     //     .arg(format!("HAB_BLDR_URL={}", bldr_url))
     //     .arg("-e")
@@ -1612,6 +1612,7 @@ pub(crate) fn standard_package_build(
             "HAB_ORIGIN",
             build_step.plan_ctx.id.as_ref().origin.to_string(),
         )
+        .env("HAB_ORIGIN_KEYS", origin_keys)
         .env("HAB_LICENSE", "accept-no-persist")
         .env("HAB_STUDIO_INSTALL_PKGS", deps_to_install)
         .env("NO_INSTALL_DEPS", "1")

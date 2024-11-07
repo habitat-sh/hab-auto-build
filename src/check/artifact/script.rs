@@ -1,21 +1,27 @@
 use std::{fmt::Display, path::PathBuf};
+
 #[cfg(not(target_os = "windows"))]
 use std::collections::HashSet;
+
 use owo_colors::OwoColorize;
+
 #[cfg(not(target_os = "windows"))]
 use path_absolutize::Absolutize;
+
 use serde::{Deserialize, Serialize};
+
 #[cfg(not(target_os = "windows"))]
 use tracing::{debug, error};
 
 use crate::{
     check::{
-        ArtifactCheck, CheckerContext,
-        LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
+        ArtifactCheck, CheckerContext, LeveledArtifactCheckViolation, PlanContextConfig,
+        ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackageIdent, PackagePath},
     store::Store,
 };
+
 #[cfg(not(target_os = "windows"))]
 use crate::check::{ArtifactCheckViolation, ArtifactRuleOptions};
 

@@ -7,10 +7,13 @@ use std::{
     sync::mpsc::Sender,
     time::Instant,
 };
+
 #[cfg(not(target_os = "windows"))]
 use std::io::Read;
+
 #[cfg(windows)]
 use std::fs::{self, File};
+
 #[cfg(windows)]
 use std::io::BufWriter;
 
@@ -23,6 +26,7 @@ use diesel::SqliteConnection;
 use ignore::{ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 
 use lazy_static::lazy_static;
+
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 

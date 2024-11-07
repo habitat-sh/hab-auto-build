@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    fmt::Display,
-    path::PathBuf,
-};
+use std::{collections::BTreeSet, fmt::Display, path::PathBuf};
 
 #[cfg(not(target_os = "windows"))]
 use std::{
@@ -15,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     check::{
-        ArtifactCheck, CheckerContext,
-        LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
+        ArtifactCheck, CheckerContext, LeveledArtifactCheckViolation, PlanContextConfig,
+        ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, PackageDepGlob, PackageIdent, PackagePath},
     store::Store,

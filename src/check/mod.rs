@@ -7,26 +7,30 @@ use std::{
 };
 
 use crate::{
-    core::{
-        ArtifactCache, ArtifactContext, PackageIdent, PlanContext, SourceContext,
-    },
+    core::{ArtifactCache, ArtifactContext, PackageIdent, PlanContext, SourceContext},
     store::Store,
 };
+
 #[cfg(not(target_os = "windows"))]
 use crate::core::PackageTarget;
+
 #[cfg(not(target_os = "windows"))]
 use color_eyre::{
     eyre::{eyre, Result},
     Help, SectionExt,
 };
+
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
+
 #[cfg(not(target_os = "windows"))]
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Value};
+
 use tracing::debug;
 
 #[cfg(target_os = "linux")]
 use self::artifact::elf::{ElfCheck, ElfRule, ElfRuleOptions};
+
 #[cfg(target_os = "macos")]
 use self::artifact::macho::{MachORule, MachORuleOptions};
 

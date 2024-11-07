@@ -1,7 +1,9 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use color_eyre::eyre::{eyre, Context, Result};
+
 #[cfg(not(target_os = "windows"))]
-use color_eyre::{ Help, SectionExt};
+use color_eyre::{Help, SectionExt};
+
 use diesel::Connection;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use goblin::{
@@ -996,30 +998,35 @@ impl ArtifactContext {
                             })
                         }
                         RawArtifactItem::Resource(path, file_mode, kind, data) => {
-                            Ok(match Resource::from_data(&path, file_mode, kind, data) {
-                                Err(err) => {
-                                    error!(
-                                        "Failed to read {} detected as {:?} resource: {:?}",
-                                        path.display(),
-                                        kind,
-                                        err
-                                    );
-                                    vec![]
-                                }
-                                Ok(resource) => match resource {
-                                    Resource::Elf(metadata) => {
-                                        vec![IndexedArtifactItem::Elf((path, metadata))]
-                                    }
-                                    Resource::Script(metadata) => {
-                                        vec![IndexedArtifactItem::Script((path, metadata))]
-                                    }
-                                    Resource::MachO(metadata) => {
-                                        vec![IndexedArtifactItem::MachO((path, metadata))]
-                                    }
-                                    _ => {
+                            Ok(if cfg!(target_os = "windows") {
+                                debug!("Skipping raw artifact resource check for issues");
+                                vec![] // Skip processing on Windows
+                            } else {
+                                match Resource::from_data(&path, file_mode, kind, data) {
+                                    Err(err) => {
+                                        error!(
+                                            "Failed to read {} detected as {:?} resource: {:?}",
+                                            path.display(),
+                                            kind,
+                                            err
+                                        );
                                         vec![]
                                     }
-                                },
+                                    Ok(resource) => match resource {
+                                        Resource::Elf(metadata) => {
+                                            vec![IndexedArtifactItem::Elf((path, metadata))]
+                                        }
+                                        Resource::Script(metadata) => {
+                                            vec![IndexedArtifactItem::Script((path, metadata))]
+                                        }
+                                        Resource::MachO(metadata) => {
+                                            vec![IndexedArtifactItem::MachO((path, metadata))]
+                                        }
+                                        _ => {
+                                            vec![]
+                                        }
+                                    },
+                                }
                             })
                         }
                     }

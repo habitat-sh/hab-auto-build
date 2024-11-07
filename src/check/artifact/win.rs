@@ -6,8 +6,8 @@ use tracing::debug;
 
 use crate::{
     check::{
-        ArtifactCheck, CheckerContext,
-        LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
+        ArtifactCheck, CheckerContext, LeveledArtifactCheckViolation, PlanContextConfig,
+        ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackagePath},
     store::Store,

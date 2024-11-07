@@ -1,21 +1,19 @@
-use std::{
-    collections::BTreeSet,
-    fmt::Display,
-    path::PathBuf,
-};
+use std::{collections::BTreeSet, fmt::Display, path::PathBuf};
+
 #[cfg(not(target_os = "windows"))]
 use std::collections::HashMap;
+
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    check::{
-        LeveledSourceCheckViolation, PlanContextConfig, SourceCheck, ViolationLevel,
-    },
+    check::{LeveledSourceCheckViolation, PlanContextConfig, SourceCheck, ViolationLevel},
     core::{ArtifactContext, PackageSha256Sum, PlanContext, SourceContext},
 };
+
 #[cfg(not(target_os = "windows"))]
 use crate::check::{SourceCheckViolation, SourceRuleOptions};
+
 #[cfg(target_os = "windows")]
 use tracing::debug;
 
