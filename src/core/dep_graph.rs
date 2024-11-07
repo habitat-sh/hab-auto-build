@@ -692,7 +692,7 @@ impl DepGraph {
                         match dep_node {
                             Dependency::ResolvedDep(dep) => {
                                 warn!(target: "user-log",
-                                    "Not checking for updates to remote dependency: {}",
+                                    "Not checking for updates to resolved dependency: {}",
                                     dep
                                 );
                             }
