@@ -581,6 +581,14 @@ impl PlanContext {
                         continue;
                     }
 
+                    // Why do we care about the directory timestamp? If the build system writes temporary files
+                    // in that directory, its timestamp is modified, causing it to be rebuilt even when nothing
+                    // has changed according to the plan. For now, this is handled only for Windows, but we could explore
+                    // a better way to track plan-related files instead of scanning the entire directory for changes.
+                    if cfg!(target_os = "windows") && entry.path().is_dir() {
+                        continue;
+                    }
+
                     match entry.path().last_modifed_at() {
                         Ok(real_last_modified_at) => {
                             if entry.path() == self.target_context_path.as_ref() {

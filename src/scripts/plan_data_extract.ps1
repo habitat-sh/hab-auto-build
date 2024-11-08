@@ -5,6 +5,48 @@ if ($args.Count -eq 0) {
 
 . $args[0]
 
+function Get-CACertVersion {
+    try {
+        $tempFile = New-TemporaryFile
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://curl.se/ca/cacert.pem' -OutFile $tempFile
+        $datePrefix = "## Certificate data from Mozilla as of: "
+        $dateLine = Get-Content $tempFile | Where-Object {
+            $_.StartsWith($datePrefix)
+        }
+        $buildDate = $dateLine.Substring($datePrefix.Length)
+        if ($buildDate -match '\b\d{1}\b') {
+            $format = 'ddd MMM d HH:mm:ss yyyy GMT'
+        } else {
+            $format = 'ddd MMM dd HH:mm:ss yyyy GMT'
+        }
+
+        $version = [datetime]::ParseExact($buildDate, $format, $null).ToString("yyyy.MM.dd")
+        Remove-Item $tempFile -Force | Out-Null
+
+        return $version
+    } catch {
+        Write-Error "Failed to retrieve the version: $_"
+        return $null
+    }
+}
+
+function Get-CACertSHA256 {
+    $tempFile = New-TemporaryFile
+    Invoke-WebRequest -UseBasicParsing -Uri 'https://curl.se/ca/cacert.pem.sha256' -OutFile $tempFile
+    $shasum = ((Get-Content $tempFile) -split ' ')[0]
+    Remove-Item $tempFile -Force | Out-Null
+
+    return $shasum
+}
+
+# This is a temporary workaround for cacerts, where we dynamically populate 
+# the version as _set_from_downloaded_cacerts_file_ and 
+# the SHA256 checksum as _set_from_downloaded_cacerts_sha256_file_.
+if ($pkg_name -eq "cacerts") {
+    $pkg_version = Get-CACertVersion
+    $pkg_shasum = Get-CACertSHA256
+}
+
 function ConvertTo-Array($var) {
     if ($null -eq $var) {
         return @() 
@@ -39,9 +81,9 @@ if (-not [string]::IsNullOrWhiteSpace($pkg_shasum)) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($pkg_version)) {
-    $pkg_version = $pkg_version.Trim()
+    $_version = $pkg_version.Trim()
 } else {
-    $pkg_version = "**DYNAMIC**"
+    $_version = "**DYNAMIC**"
 }
 
 # Construct the full JSON string
@@ -49,7 +91,7 @@ $jsonOutput = @"
 {
     "origin": "$pkg_origin",
     "name": "$pkg_name",
-    "version": "$pkg_version",$sourceJson
+    "version": "$_version",$sourceJson
     "licenses": $licensesJson,
     "scaffolding_dep": null,
     "deps": $depsJson,
