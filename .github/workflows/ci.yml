@@ -19,6 +19,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         architecture: [x64, arm64]
         toolchain: [stable]
+        exclude:
+          - os: windows-latest
+            architecture: arm64
 
     steps:
       - uses: actions/checkout@v4
