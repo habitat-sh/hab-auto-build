@@ -86,6 +86,7 @@ pub(crate) enum Dependency {
     ResolvedDep(PackageIdent),
     #[serde(rename = "remote_dependency")]
     RemoteDep(PackageResolvedDepIdent),
+    #[allow(clippy::large_enum_variant)]
     #[serde(rename = "local_plan")]
     LocalPlan(PlanContext),
 }
