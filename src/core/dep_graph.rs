@@ -79,6 +79,7 @@ type PackageVersionList = HashMap<
     >,
 >;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "dependency_type", content = "data")]
 pub(crate) enum Dependency {
@@ -86,7 +87,6 @@ pub(crate) enum Dependency {
     ResolvedDep(PackageIdent),
     #[serde(rename = "remote_dependency")]
     RemoteDep(PackageResolvedDepIdent),
-    #[allow(clippy::large_enum_variant)]
     #[serde(rename = "local_plan")]
     LocalPlan(PlanContext),
 }
