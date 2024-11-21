@@ -1,8 +1,9 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
-use color_eyre::{
-    eyre::{eyre, Context, Result},
-    Help, SectionExt,
-};
+use color_eyre::eyre::{eyre, Context, Result};
+
+#[cfg(not(target_os = "windows"))]
+use color_eyre::{Help, SectionExt};
+
 use diesel::Connection;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use goblin::{
@@ -23,15 +24,19 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
     fmt::Display,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read},
     ops::Deref,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         mpsc::{channel, Sender},
         Arc, RwLock, RwLockWriteGuard,
     },
     time::Instant,
+};
+#[cfg(not(target_os = "windows"))]
+use std::{
+    io::Write,
+    process::{Command, Stdio},
 };
 use tar::Archive;
 use tracing::{debug, error, info, trace};
@@ -74,6 +79,8 @@ lazy_static! {
         globset_builder.build().unwrap()
     };
 }
+
+#[cfg(not(target_os = "windows"))]
 const ARTIFACT_DATA_EXTRACT_SCRIPT: &[u8] = include_bytes!("../scripts/artifact_data_extract.sh");
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
@@ -83,6 +90,8 @@ impl ArtifactCachePath {
     pub fn new(hab_root: HabitatRootPath) -> ArtifactCachePath {
         ArtifactCachePath(hab_root.as_ref().join("cache").join("artifacts"))
     }
+
+    #[cfg(not(target_os = "windows"))]
     pub fn artifact_path(&self, ident: &PackageIdent) -> ArtifactPath {
         ArtifactPath(self.0.join(ident.artifact_name()))
     }
@@ -141,6 +150,7 @@ impl LazyArtifactContext {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct ArtifactCache {
     pub path: ArtifactCachePath,
     known_artifacts: Arc<RwLock<ArtifactList>>,
@@ -274,6 +284,7 @@ impl ArtifactCache {
         self.load_lazy_artifact(lazy_artifact)
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn latest_minimal_artifact(
         &self,
         dep_ident: &PackageResolvedDepIdent,
@@ -496,6 +507,29 @@ impl From<u32> for MachOType {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum PeType {
+    #[serde(rename = "executable")]
+    Executable,
+    #[serde(rename = "dynamic-link-library")]
+    DynamicLinkLibrary,
+    #[serde(rename = "system-driver")]
+    SystemDriver,
+    #[serde(rename = "other")]
+    Other,
+}
+
+impl Display for PeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeType::Executable => write!(f, "executable"),
+            PeType::DynamicLinkLibrary => write!(f, "dynamic-link-library"),
+            PeType::SystemDriver => write!(f, "system-driver"),
+            PeType::Other => write!(f, "other"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ScriptMetadata {
     pub interpreter: ScriptInterpreterMetadata,
@@ -591,10 +625,13 @@ impl From<&ArtifactContext> for MinimalArtifactContext {
     }
 }
 
+#[derive(Debug)]
 enum RawArtifactItem {
     MetaFile(String, String),
     Resource(PathBuf, u32, FileKind, Vec<u8>),
 }
+
+#[derive(Debug)]
 enum IndexedArtifactItem {
     PackageIdent(PackageDepIdent),
     PackageTarget(PackageTarget),
@@ -667,7 +704,9 @@ impl ArtifactContext {
             .transpose()?
             .ok_or(eyre!("Invalid artifact name"))?;
 
-        if let Some(entry) = (tar.entries()?).next() {
+        // We need to skip 5 entries to retrieve the path with the full identifier.
+        let entries_to_skip = if cfg!(target_os = "windows") { 5 } else { 0 };
+        if let Some(entry) = (tar.entries()?).nth(entries_to_skip) {
             let entry = entry?;
             let path = entry.path()?;
 
@@ -751,8 +790,11 @@ impl ArtifactContext {
         let mut elfs = HashMap::new();
         let mut machos = HashMap::new();
 
+        // We need to skip 5 entries to retrieve the path with the full identifier.
+        let entries_to_skip = if cfg!(target_os = "windows") { 5 } else { 0 };
         let indexed_item_batches = tar
             .entries()?
+            .skip(entries_to_skip)
             .filter_map(|entry| entry.ok())
             .map(|mut entry| {
                 let header = entry.header();
@@ -901,7 +943,9 @@ impl ArtifactContext {
                                                 .split_terminator(&['[', ']'])
                                                 .collect::<Vec<_>>();
                                             if let Some(url) = src.get(1) {
-                                                pkg_source = Some(Url::parse(url)?);
+                                                if !url.is_empty() {
+                                                    pkg_source = Some(Url::parse(url)?);
+                                                }
                                             }
                                         }
                                         if let Some(value) = line.strip_prefix("* __SHA__:") {
@@ -925,8 +969,16 @@ impl ArtifactContext {
                                             },
                                         ));
                                     }
+                                    let shell_type = if cfg!(target_os = "windows") {
+                                        "ps1"
+                                    } else {
+                                        "bash"
+                                    };
+
+                                    // Split the source based on the delimiter
+                                    let split_str = format!("```{}", shell_type);
                                     plan_source = plan_source
-                                        .split_once("```bash")
+                                        .split_once(&split_str)
                                         .unwrap()
                                         .1
                                         .rsplit_once("```")
@@ -946,30 +998,35 @@ impl ArtifactContext {
                             })
                         }
                         RawArtifactItem::Resource(path, file_mode, kind, data) => {
-                            Ok(match Resource::from_data(&path, file_mode, kind, data) {
-                                Err(err) => {
-                                    error!(
-                                        "Failed to read {} detected as {:?} resource: {:?}",
-                                        path.display(),
-                                        kind,
-                                        err
-                                    );
-                                    vec![]
-                                }
-                                Ok(resource) => match resource {
-                                    Resource::Elf(metadata) => {
-                                        vec![IndexedArtifactItem::Elf((path, metadata))]
-                                    }
-                                    Resource::Script(metadata) => {
-                                        vec![IndexedArtifactItem::Script((path, metadata))]
-                                    }
-                                    Resource::MachO(metadata) => {
-                                        vec![IndexedArtifactItem::MachO((path, metadata))]
-                                    }
-                                    _ => {
+                            Ok(if cfg!(target_os = "windows") {
+                                debug!("Skipping raw artifact resource check for issues");
+                                vec![] // Skip processing on Windows
+                            } else {
+                                match Resource::from_data(&path, file_mode, kind, data) {
+                                    Err(err) => {
+                                        error!(
+                                            "Failed to read {} detected as {:?} resource: {:?}",
+                                            path.display(),
+                                            kind,
+                                            err
+                                        );
                                         vec![]
                                     }
-                                },
+                                    Ok(resource) => match resource {
+                                        Resource::Elf(metadata) => {
+                                            vec![IndexedArtifactItem::Elf((path, metadata))]
+                                        }
+                                        Resource::Script(metadata) => {
+                                            vec![IndexedArtifactItem::Script((path, metadata))]
+                                        }
+                                        Resource::MachO(metadata) => {
+                                            vec![IndexedArtifactItem::MachO((path, metadata))]
+                                        }
+                                        _ => {
+                                            vec![]
+                                        }
+                                    },
+                                }
                             })
                         }
                     }
@@ -1090,6 +1147,7 @@ impl ArtifactContext {
         .into())
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn extract_licenses_from_plan_source(plan_source: &str) -> Result<Vec<String>> {
         let mut child =  Command::new("bash")
             .arg("-s")
@@ -1130,9 +1188,27 @@ impl ArtifactContext {
             .with_section(move || plan_source.to_owned().header("manifest:"))
         }
     }
+
+    #[cfg(target_os = "windows")]
+    fn extract_licenses_from_plan_source(plan_source: &str) -> Result<Vec<String>> {
+        let regex = regex::Regex::new(r"\$pkg_license\s*=\s*@?\((.*?)\)")?;
+        if let Some(captures) = regex.captures(plan_source) {
+            let licenses_str = &captures[1];
+            let licenses = licenses_str
+                .split(',')
+                .map(|s| s.trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+
+            Ok(licenses)
+        } else {
+            Err(eyre!("No licenses found in the provided plan source."))
+        }
+    }
+
     /// Search for an executable with the given name.
     /// This function only returns a result if the found executable
     /// has the executable permission set.
+    #[cfg(not(target_os = "windows"))]
     pub fn search_runtime_executable(
         &self,
         tdeps: &HashMap<PackageIdent, ArtifactContext>,
@@ -1164,6 +1240,7 @@ impl ArtifactContext {
         None
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn resolve_path(
         &self,
         tdeps: &HashMap<PackageIdent, ArtifactContext>,
@@ -1240,6 +1317,7 @@ impl ArtifactContext {
         resolved_path
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn resolve_path_and_intermediates(
         &self,
         tdeps: &HashMap<PackageIdent, ArtifactContext>,
@@ -1321,12 +1399,14 @@ impl ArtifactContext {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 pub(crate) enum ExecutableMetadata<'a> {
     MachO(&'a MachOMetadata),
     Elf(&'a ElfMetadata),
     Script(&'a ScriptMetadata),
 }
 
+#[cfg(not(target_os = "windows"))]
 impl<'a> ExecutableMetadata<'a> {
     pub fn is_executable(&self) -> bool {
         match self {

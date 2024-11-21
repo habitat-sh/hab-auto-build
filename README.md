@@ -9,11 +9,21 @@ Install the latest stable version of Rust from https://rustup.rs/.
 
 Check out this repository, then use Cargo to build and install a static `hab-auto-build` binary.
 
+### Linux/macOS
+
 ```bash
 # Asks the rust compiler to statically link in the C Runtime
 export RUSTFLAGS='-C target-feature=+crt-static'
 # Explicitly sets the build target, this is required for the C Runtime static linking to work correctly
 export CARGO_BUILD_TARGET=$(rustc -vV | grep host | sed 's|host: ||')
+cargo install --path .
+```
+
+### Windows
+
+```powershell
+$env:RUSTFLAGS = '-C target-feature=+crt-static'
+$env:CARGO_BUILD_TARGET = (rustc -vV | Select-String 'host:' | ForEach-Object { $_ -replace 'host:\s*', '' }).Trim()
 cargo install --path .
 ```
 

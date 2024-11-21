@@ -1,18 +1,29 @@
-use std::{collections::HashSet, fmt::Display, path::PathBuf};
+use std::{fmt::Display, path::PathBuf};
+
+#[cfg(not(target_os = "windows"))]
+use std::collections::HashSet;
 
 use owo_colors::OwoColorize;
+
+#[cfg(not(target_os = "windows"))]
 use path_absolutize::Absolutize;
+
 use serde::{Deserialize, Serialize};
+
+#[cfg(not(target_os = "windows"))]
 use tracing::{debug, error};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext,
-        LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
+        ArtifactCheck, CheckerContext, LeveledArtifactCheckViolation, PlanContextConfig,
+        ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, GlobSetExpression, PackageIdent, PackagePath},
     store::Store,
 };
+
+#[cfg(not(target_os = "windows"))]
+use crate::check::{ArtifactCheckViolation, ArtifactRuleOptions};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "rule", content = "metadata")]
@@ -339,14 +350,19 @@ impl Default for UnlistedScriptInterpreterOptions {
 
 #[derive(Debug)]
 pub(crate) struct ScriptCheck {
+    #[allow(dead_code)]
     env_interpreters: Vec<String>,
+    #[allow(dead_code)]
     platform_interpreter_paths: Vec<PathBuf>,
 }
 
 impl Default for ScriptCheck {
     fn default() -> Self {
         Self {
+            #[cfg(not(target_os = "windows"))]
             env_interpreters: vec![String::from("env")],
+            #[cfg(target_os = "windows")]
+            env_interpreters: vec![String::from("cmd"), String::from("powershell")],
             #[cfg(target_os = "linux")]
             platform_interpreter_paths: vec![PathBuf::from("/bin/sh"), PathBuf::from("/bin/false")],
             #[cfg(target_os = "macos")]
@@ -355,11 +371,30 @@ impl Default for ScriptCheck {
                 PathBuf::from("/bin/false"),
                 PathBuf::from("/usr/bin/env"),
             ],
+            #[cfg(target_os = "windows")]
+            platform_interpreter_paths: vec![
+                PathBuf::from("C:\\Windows\\System32\\cmd.exe"),
+                PathBuf::from("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+            ],
         }
     }
 }
 
 impl ArtifactCheck for ScriptCheck {
+    #[cfg(target_os = "windows")]
+    fn artifact_context_check(
+        &self,
+        _store: &Store,
+        _rules: &PlanContextConfig,
+        _checker_context: &mut CheckerContext,
+        _artifact_cache: &mut ArtifactCache,
+        _artifact_context: &ArtifactContext,
+    ) -> Vec<LeveledArtifactCheckViolation> {
+        // Currently, we do not know what the violations are for Windows; we will revisit this later.
+        vec![].into_iter().collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn artifact_context_check(
         &self,
         _store: &Store,

@@ -79,6 +79,7 @@ type PackageVersionList = HashMap<
     >,
 >;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "dependency_type", content = "data")]
 pub(crate) enum Dependency {
@@ -210,6 +211,7 @@ impl From<&DepGraph> for DepGraphData {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct DepGraph {
     pub build_graph: StableGraph<Dependency, DependencyType, Directed>,
     #[allow(dead_code)]
@@ -691,7 +693,7 @@ impl DepGraph {
                         match dep_node {
                             Dependency::ResolvedDep(dep) => {
                                 warn!(target: "user-log",
-                                    "Not checking for updates to remote dependency: {}",
+                                    "Not checking for updates to resolved dependency: {}",
                                     dep
                                 );
                             }

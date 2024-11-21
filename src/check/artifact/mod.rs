@@ -4,3 +4,5 @@ pub mod elf;
 pub mod macho;
 pub mod package;
 pub mod script;
+#[cfg(target_os = "windows")]
+pub mod win;

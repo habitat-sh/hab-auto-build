@@ -135,7 +135,7 @@ impl AsRef<Path> for PackageSourceLicenseStorePath {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct Store {
     path: StorePath,
     pool: Pool<ConnectionManager<SqliteConnection>>,

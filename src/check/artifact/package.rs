@@ -1,8 +1,9 @@
+use std::{collections::BTreeSet, fmt::Display, path::PathBuf};
+
+#[cfg(not(target_os = "windows"))]
 use std::{
-    collections::{hash_map::Entry, BTreeSet, HashMap},
+    collections::{hash_map::Entry, HashMap},
     ffi::OsString,
-    fmt::Display,
-    path::PathBuf,
 };
 
 use owo_colors::OwoColorize;
@@ -10,12 +11,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     check::{
-        ArtifactCheck, ArtifactCheckViolation, ArtifactRuleOptions, CheckerContext,
-        LeveledArtifactCheckViolation, PlanContextConfig, ViolationLevel,
+        ArtifactCheck, CheckerContext, LeveledArtifactCheckViolation, PlanContextConfig,
+        ViolationLevel,
     },
     core::{ArtifactCache, ArtifactContext, PackageDepGlob, PackageIdent, PackagePath},
     store::Store,
 };
+
+#[cfg(not(target_os = "windows"))]
+use crate::check::{ArtifactCheckViolation, ArtifactRuleOptions};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "rule", content = "metadata")]
@@ -333,6 +337,20 @@ impl Default for DuplicateRuntimeBinaryOptions {
 pub(crate) struct PackageBeforeCheck {}
 
 impl ArtifactCheck for PackageBeforeCheck {
+    #[cfg(target_os = "windows")]
+    fn artifact_context_check(
+        &self,
+        _store: &Store,
+        _rules: &PlanContextConfig,
+        _checker_context: &mut CheckerContext,
+        _artifact_cache: &mut ArtifactCache,
+        _artifact_context: &ArtifactContext,
+    ) -> Vec<LeveledArtifactCheckViolation> {
+        // Currently, we do not know what the violations are for Windows; we will revisit this later.
+        vec![].into_iter().collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn artifact_context_check(
         &self,
         _store: &Store,
@@ -662,6 +680,20 @@ impl ArtifactCheck for PackageBeforeCheck {
 pub(crate) struct PackageAfterCheck {}
 
 impl ArtifactCheck for PackageAfterCheck {
+    #[cfg(target_os = "windows")]
+    fn artifact_context_check(
+        &self,
+        _store: &Store,
+        _rules: &PlanContextConfig,
+        _checker_context: &mut CheckerContext,
+        _artifact_cache: &mut ArtifactCache,
+        _artifact_context: &ArtifactContext,
+    ) -> Vec<LeveledArtifactCheckViolation> {
+        // Currently, we do not know what the violations are for Windows; we will revisit this later.
+        vec![].into_iter().collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn artifact_context_check(
         &self,
         _store: &Store,

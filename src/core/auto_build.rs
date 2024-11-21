@@ -155,6 +155,7 @@ impl Display for AnalysisType {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct AutoBuildContext {
     #[allow(dead_code)]
     path: AutoBuildContextPath,
@@ -208,6 +209,7 @@ pub(crate) struct BuildStep<'a> {
     pub studio: BuildStepStudio,
     pub allow_remote: bool,
     pub studio_package: Option<&'a PackageDepIdent>,
+    #[allow(dead_code)]
     pub origins: HashSet<PackageOrigin>,
     pub deps_to_install: Vec<&'a PlanContextID>,
     pub remote_deps: Vec<&'a Dependency>,
@@ -1103,13 +1105,16 @@ impl AutoBuildContext {
         let node_indices = changes_graph.node_indices().collect::<Vec<_>>();
         let mut check_deps = self.dep_graph.get_deps(
             &node_indices,
-            vec![
-                DependencyType::Runtime,
-                DependencyType::Build,
-                DependencyType::Studio,
-            ]
-            .into_iter()
-            .collect(),
+            {
+                let mut deps = vec![DependencyType::Runtime, DependencyType::Build];
+
+                // For Windows, we only have standard packages, so we can use the installed studio.
+                if !cfg!(target_os = "windows") {
+                    deps.push(DependencyType::Studio);
+                }
+
+                deps.into_iter().collect()
+            },
             DependencyDepth::Transitive,
             DependencyDirection::Forward,
             false,
