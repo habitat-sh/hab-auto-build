@@ -32,7 +32,7 @@ xz2 = { version = "0.1" }
 zstd = { version = "0.13.2" }
 globset = { version = "0.4" }
 chrono-humanize = { version = "0.2" }
-thiserror = { version = "1" }
+thiserror = { version = "2" }
 emoji-printer = "0.4.3"
 num_cpus = "1.0"
 tempdir = "0.3"
