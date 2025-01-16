@@ -452,7 +452,6 @@ pub(crate) fn native_package_build(
 
         cmd = Exec::cmd("docker")
             .arg("run")
-            .arg("-it")
             .arg("--name")
             .arg(container_name)
             .arg("-v")

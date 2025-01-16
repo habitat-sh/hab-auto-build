@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         .with_level(false)
         .without_time()
         .with_filter(filter::filter_fn(|metadata| {
-            metadata.target() == "user-ui" && *metadata.level() == Level::INFO
+            metadata.target() == "user-ui" && *metadata.level() <= Level::INFO
         }));
     let user_log_layer = fmt::layer()
         .with_target(false)

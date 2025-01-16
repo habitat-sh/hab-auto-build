@@ -160,7 +160,7 @@ pub(crate) struct AutoBuildContext {
     #[allow(dead_code)]
     path: AutoBuildContextPath,
     studios: BuildStudioConfig,
-    store: Store,
+    pub(crate) store: Store,
     repos: HashMap<RepoContextID, RepoContext>,
     dep_graph: DepGraph,
     artifact_cache: Arc<RwLock<ArtifactCache>>,

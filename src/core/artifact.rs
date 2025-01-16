@@ -1660,8 +1660,8 @@ where
     }
 }
 
-impl<'a> ArtifactIndexerBuilder<'a> {
-    pub fn new(store: &'a Store, sender: Sender<LazyArtifactContext>) -> ArtifactIndexerBuilder {
+impl ArtifactIndexerBuilder<'_> {
+    pub fn new(store: &Store, sender: Sender<LazyArtifactContext>) -> ArtifactIndexerBuilder {
         ArtifactIndexerBuilder { store, sender }
     }
 }
