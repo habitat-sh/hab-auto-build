@@ -543,7 +543,7 @@ async fn upload_package<U: Into<PathBuf>>(
             .await
         {
             Ok(_) => {
-                info!(target: "user-ui", "Package '{}' Uploades Successfully.", &ident.bold().green());
+                info!(target: "user-ui", "Package '{}' Uploaded Successfully.", &ident.bold().green());
                 Ok(())
             }
             Err(err) => Err(std::io::Error::other(err.to_string()).into()),
@@ -600,6 +600,11 @@ async fn upload_tdeps_for_package(
     if let Some(parent) = dep_pkg_dir {
         for dep in tdeps {
             let dep_path = parent.join(dep.archive_name_with_target(archive.target()?).unwrap());
+            if !dep_path.try_exists()? {
+                warn!(target: "user-ui", "Transitive dependency '{}' not found in the hab-auto-build artifacts cache. Not uploading.", dep_path.display().bold().yellow());
+                continue;
+            }
+
             Box::pin(upload_package(
                 dep_path,
                 builder_url.clone(),
