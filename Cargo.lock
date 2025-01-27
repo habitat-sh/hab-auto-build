@@ -1338,7 +1338,7 @@ dependencies = [
 [[package]]
 name = "habitat_api_client"
 version = "0.0.0"
-source = "git+https://github.com/habitat-sh/habitat?branch=agadgil%2Frustls-023#b40dc6fccfbb4cf4f588010791524590bf143bf7"
+source = "git+https://github.com/habitat-sh/habitat#f917736370452faeac8f7d02a0b619c073c3f3b9"
 dependencies = [
  "broadcast",
  "bytes",
@@ -1363,7 +1363,7 @@ dependencies = [
 [[package]]
 name = "habitat_common"
 version = "0.0.0"
-source = "git+https://github.com/habitat-sh/habitat?branch=agadgil%2Frustls-023#b40dc6fccfbb4cf4f588010791524590bf143bf7"
+source = "git+https://github.com/habitat-sh/habitat#f917736370452faeac8f7d02a0b619c073c3f3b9"
 dependencies = [
  "async-trait",
  "bimap",
@@ -1406,7 +1406,7 @@ dependencies = [
 [[package]]
 name = "habitat_core"
 version = "0.0.0"
-source = "git+https://github.com/habitat-sh/habitat?branch=agadgil%2Frustls-023#b40dc6fccfbb4cf4f588010791524590bf143bf7"
+source = "git+https://github.com/habitat-sh/habitat#f917736370452faeac8f7d02a0b619c073c3f3b9"
 dependencies = [
  "base64 0.22.1",
  "blake2b_simd",
@@ -1456,7 +1456,7 @@ dependencies = [
 [[package]]
 name = "habitat_http_client"
 version = "0.0.0"
-source = "git+https://github.com/habitat-sh/habitat?branch=agadgil%2Frustls-023#b40dc6fccfbb4cf4f588010791524590bf143bf7"
+source = "git+https://github.com/habitat-sh/habitat#f917736370452faeac8f7d02a0b619c073c3f3b9"
 dependencies = [
  "base64 0.22.1",
  "env_proxy",
@@ -1474,7 +1474,7 @@ dependencies = [
 [[package]]
 name = "habitat_win_users"
 version = "0.0.0"
-source = "git+https://github.com/habitat-sh/habitat?branch=agadgil%2Frustls-023#b40dc6fccfbb4cf4f588010791524590bf143bf7"
+source = "git+https://github.com/habitat-sh/habitat#f917736370452faeac8f7d02a0b619c073c3f3b9"
 dependencies = [
  "cc",
  "log 0.4.25",

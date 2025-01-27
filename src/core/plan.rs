@@ -568,7 +568,7 @@ impl PlanContext {
                         .ok()
                         .and_then(|p| p.components().next())
                         .and_then(|p| p.as_os_str().to_str())
-                        .map_or(false, |p| p == "habitat" || PackageTarget::parse(p).is_ok());
+                        .is_some_and(|p| p == "habitat" || PackageTarget::parse(p).is_ok());
                     let is_plan_config = if let Some(file_name) = entry.path().file_name() {
                         file_name == PLAN_CONFIG_FILE
                     } else {

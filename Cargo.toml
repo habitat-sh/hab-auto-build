@@ -62,9 +62,9 @@ rayon = "1.7.0"
 # Vendors OpenSSL so we don't have to depend on the system
 native-tls = { version = "0.2", features = ["vendored"] }
 
-habitat_core = { git = "https://github.com/habitat-sh/habitat", branch = "agadgil/rustls-023" }
-habitat_common = { git = "https://github.com/habitat-sh/habitat", branch = "agadgil/rustls-023" }
-habitat_api_client = { git = "https://github.com/habitat-sh/habitat", branch = "agadgil/rustls-023" }
+habitat_core = { git = "https://github.com/habitat-sh/habitat" }
+habitat_common = { git = "https://github.com/habitat-sh/habitat" }
+habitat_api_client = { git = "https://github.com/habitat-sh/habitat" }
 
 [build-dependencies]
 color-eyre = { version = "0.6", default-features = false }
