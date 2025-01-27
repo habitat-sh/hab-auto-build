@@ -564,7 +564,7 @@ impl ArtifactCheck for PackageBeforeCheck {
                                                         entry
                                                             .get()
                                                             .package_ident(artifact_ctx.target)
-                                                            .map_or(false, |ident| {
+                                                            .is_some_and(|ident| {
                                                                 dep_ident
                                                                     .matcher()
                                                                     .matches_package_ident(&ident)
@@ -611,7 +611,7 @@ impl ArtifactCheck for PackageBeforeCheck {
                                                         entry
                                                             .get()
                                                             .package_ident(artifact_ctx.target)
-                                                            .map_or(false, |ident| {
+                                                            .is_some_and(|ident| {
                                                                 dep_ident
                                                                     .matcher()
                                                                     .matches_package_ident(&ident)

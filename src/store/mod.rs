@@ -289,8 +289,7 @@ pub(crate) fn build_time_put(
     if build_times
         .filter(build_ident.eq(build_ident_value.to_string()))
         .load::<BuildTimeRecord>(connection)?
-        .first()
-        .is_none()
+        .is_empty()
     {
         insert_into(build_times)
             .values((
@@ -331,8 +330,7 @@ pub(crate) fn source_context_put(
     if source_contexts
         .filter(hash.eq(hash_value.to_string()))
         .load::<SourceContextRecord>(connection)?
-        .first()
-        .is_none()
+        .is_empty()
     {
         insert_into(source_contexts)
             .values((
