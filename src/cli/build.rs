@@ -264,7 +264,7 @@ pub(crate) fn execute(args: Params) -> Result<()> {
                     ));
                 }
             }
-            match run_context.build_step_execute(&step) {
+            match run_context.build_step_execute(step) {
                 Ok(build_result) => {
                     output_violations(
                         Some(step.plan_ctx.plan_path.plan_config_path()),
@@ -447,24 +447,22 @@ fn upload_packages(
 
     let mut handles = vec![];
     // TODO: This `enumerate` is only for testing, remove it when not needed
-    for (_count, entry) in artifacts_dir.read_dir()?.enumerate() {
+    for entry in artifacts_dir.read_dir()? {
         let entry = entry?.path();
         if entry.is_dir() {
             warn!(target: "user-ui", "Entry '{}' is a directory, ignoring.", entry.display().bold().yellow());
+        } else if entry.extension().unwrap().to_str() == Some("hart") {
+            info!(target: "user-ui", "Uploading package '{}'.", entry.display().bold().green());
+            let permit = permits.clone();
+            handles.push(runtime.spawn(upload_package(
+                entry,
+                builder_url.to_string(),
+                auth_token.to_string(),
+                permit,
+                true,
+            )));
         } else {
-            if entry.extension().unwrap().to_str() == Some("hart") {
-                info!(target: "user-ui", "Uploading package '{}'.", entry.display().bold().green());
-                let permit = permits.clone();
-                handles.push(runtime.spawn(upload_package(
-                    entry,
-                    builder_url.to_string(),
-                    auth_token.to_string(),
-                    permit,
-                    true,
-                )));
-            } else {
-                info!(target: "user-ui", "File '{}' is not habitat package archive. Ignoring.", entry.display().bold().green());
-            }
+            info!(target: "user-ui", "File '{}' is not habitat package archive. Ignoring.", entry.display().bold().green());
         }
     }
 

@@ -767,7 +767,7 @@ pub(crate) struct PlanScanner<'a> {
     sender: Sender<PlanContext>,
 }
 
-impl<'a> ParallelVisitor for PlanScanner<'a> {
+impl ParallelVisitor for PlanScanner<'_> {
     fn visit(
         &mut self,
         entry: std::result::Result<ignore::DirEntry, ignore::Error>,

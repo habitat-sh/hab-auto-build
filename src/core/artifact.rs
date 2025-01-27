@@ -1407,7 +1407,7 @@ pub(crate) enum ExecutableMetadata<'a> {
 }
 
 #[cfg(not(target_os = "windows"))]
-impl<'a> ExecutableMetadata<'a> {
+impl ExecutableMetadata<'_> {
     pub fn is_executable(&self) -> bool {
         match self {
             ExecutableMetadata::MachO(metadata) => {
@@ -1429,7 +1429,7 @@ pub(crate) struct ArtifactIndexer<'a> {
     sender: Sender<LazyArtifactContext>,
 }
 
-impl<'a> ParallelVisitor for ArtifactIndexer<'a> {
+impl ParallelVisitor for ArtifactIndexer<'_> {
     fn visit(
         &mut self,
         entry: std::result::Result<ignore::DirEntry, ignore::Error>,
